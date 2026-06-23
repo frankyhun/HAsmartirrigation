@@ -3161,10 +3161,11 @@ class SmartIrrigationCoordinator(DataUpdateCoordinator):
     async def async_unload(self):
         """Remove all Smart Irrigation objects."""
 
-        # remove zone entities
-        zones = list(self.hass.data[const.DOMAIN]["zones"].keys())
-        for zone in zones:
-            await self.async_remove_entity(zone)
+        # Clear the in-memory zones dict only; the entity platform manages entity
+        # state on unload. Registry entries are preserved so user customizations
+        # (friendly names, areas) survive disable/re-enable cycles and entity_id
+        # collisions (_2, _3 suffixes) no longer happen on re-enable. See #506.
+        self.hass.data[const.DOMAIN]["zones"].clear()
 
         # remove subscriptions for coordinator
         while self._subscriptions:
