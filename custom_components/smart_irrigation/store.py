@@ -41,6 +41,7 @@ from .const import (
     CONF_DEFAULT_IRRIGATION_START_TRIGGERS,
     CONF_DEFAULT_MAXIMUM_BUCKET,
     CONF_DEFAULT_MAXIMUM_DURATION,
+    CONF_DEFAULT_OBSERVED_WATERING_ENABLED,
     CONF_DEFAULT_PRECIPITATION_THRESHOLD_MM,
     CONF_DEFAULT_RECURRING_SCHEDULES,
     CONF_DEFAULT_SEASONAL_ADJUSTMENTS,
@@ -55,6 +56,7 @@ from .const import (
     CONF_MANUAL_LATITUDE,
     CONF_MANUAL_LONGITUDE,
     CONF_METRIC,
+    CONF_OBSERVED_WATERING_ENABLED,
     CONF_PRECIPITATION_THRESHOLD_MM,
     CONF_SENSOR_DEBOUNCE,
     CONF_SKIP_IRRIGATION_ON_PRECIPITATION,
@@ -105,9 +107,11 @@ from .const import (
     ZONE_DELTA,
     ZONE_DRAINAGE_RATE,
     ZONE_DURATION,
+    ZONE_FLOW_SENSOR,
     ZONE_ID,
     ZONE_LAST_UPDATED,
     ZONE_LEAD_TIME,
+    ZONE_LINKED_ENTITY,
     ZONE_MAPPING,
     ZONE_MAXIMUM_BUCKET,
     ZONE_MAXIMUM_DURATION,
@@ -155,6 +159,10 @@ class ZoneEntry:
     number_of_data_points = attr.ib(type=int, default=0)
     drainage_rate = attr.ib(type=float, default=CONF_DEFAULT_DRAINAGE_RATE)
     current_drainage = attr.ib(type=float, default=0)
+    # Optional valve/switch entity watched to credit the bucket (closed-loop).
+    linked_entity = attr.ib(type=str, default=None)
+    # Optional cumulative volume meter; credits the bucket by measured volume.
+    flow_sensor = attr.ib(type=str, default=None)
 
 
 @attr.s(slots=True, frozen=True)
@@ -225,6 +233,11 @@ class Config:
     manual_latitude = attr.ib(type=float, default=None)
     manual_longitude = attr.ib(type=float, default=None)
     manual_elevation = attr.ib(type=float, default=0)
+    # Closed-loop bucket: credit each zone's bucket from its linked valve's real
+    # run time instead of a manual reset automation. Off by default (opt-in).
+    observed_watering_enabled = attr.ib(
+        type=bool, default=CONF_DEFAULT_OBSERVED_WATERING_ENABLED
+    )
 
 
 class MigratableStore(Store):
@@ -468,6 +481,10 @@ class SmartIrrigationStorage:
                 manual_latitude=data["config"].get(CONF_MANUAL_LATITUDE, None),
                 manual_longitude=data["config"].get(CONF_MANUAL_LONGITUDE, None),
                 manual_elevation=data["config"].get(CONF_MANUAL_ELEVATION, 0),
+                observed_watering_enabled=data["config"].get(
+                    CONF_OBSERVED_WATERING_ENABLED,
+                    CONF_DEFAULT_OBSERVED_WATERING_ENABLED,
+                ),
             )
 
             if "zones" in data:
@@ -497,6 +514,8 @@ class SmartIrrigationStorage:
                         ),
                         drainage_rate=zone.get(ZONE_DRAINAGE_RATE, None),
                         current_drainage=zone.get(ZONE_CURRENT_DRAINAGE, None),
+                        linked_entity=zone.get(ZONE_LINKED_ENTITY, None),
+                        flow_sensor=zone.get(ZONE_FLOW_SENSOR, None),
                     )
             if "modules" in data:
                 for module in data["modules"]:

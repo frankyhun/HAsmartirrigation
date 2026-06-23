@@ -44,6 +44,11 @@ CONF_DEFAULT_SKIP_IRRIGATION_ON_PRECIPITATION = False
 CONF_PRECIPITATION_THRESHOLD_MM = "precipitation_threshold_mm"
 CONF_DEFAULT_PRECIPITATION_THRESHOLD_MM = 2.0  # 2mm threshold
 
+# Observed watering (closed-loop bucket): credit the bucket from a linked
+# valve/switch entity's real run time instead of a manual reset automation.
+CONF_OBSERVED_WATERING_ENABLED = "observed_watering_enabled"
+CONF_DEFAULT_OBSERVED_WATERING_ENABLED = False
+
 # Days between irrigation configuration
 CONF_DAYS_BETWEEN_IRRIGATION = "days_between_irrigation"
 CONF_DEFAULT_DAYS_BETWEEN_IRRIGATION = 0  # 0 = no restriction (default behavior)
@@ -263,6 +268,10 @@ ZONE_LAST_UPDATED = "last_updated"
 ZONE_NUMBER_OF_DATA_POINTS = "number_of_data_points"
 ZONE_DRAINAGE_RATE = "drainage_rate"
 ZONE_CURRENT_DRAINAGE = "current_drainage"
+# Optional valve/switch entity observed to credit the bucket (closed-loop).
+ZONE_LINKED_ENTITY = "linked_entity"
+# Optional cumulative volume/flow meter; credits the bucket by measured volume.
+ZONE_FLOW_SENSOR = "flow_sensor"
 
 MODULE_DIR = "calcmodules"
 MODULE_ID = "id"

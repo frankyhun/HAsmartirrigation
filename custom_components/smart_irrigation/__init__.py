@@ -58,6 +58,7 @@ from .helpers import (
 )
 from .irrigation_unlimited import IrrigationUnlimitedIntegration
 from .localize import localize
+from .observed_watering import ObservedWateringMixin
 from .panel import async_register_panel, remove_panel
 from .scheduler import RecurringScheduleManager, SeasonalAdjustmentManager
 from .store import SmartIrrigationStorage, async_get_registry
@@ -246,6 +247,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.irrigation_unlimited_integration.async_initialize()
 
     await coordinator.update_subscriptions()
+
+    # Closed-loop bucket: start watching linked valves if the feature is enabled.
+    await coordinator.async_setup_observed_watering()
     return True
 
 
@@ -313,7 +317,7 @@ class SmartIrrigationError(Exception):
     """Exception raised for errors in the Smart Irrigation integration."""
 
 
-class SmartIrrigationCoordinator(DataUpdateCoordinator):
+class SmartIrrigationCoordinator(ObservedWateringMixin, DataUpdateCoordinator):
     """Define an object to hold Smart Irrigation device."""
 
     def __init__(
@@ -451,6 +455,15 @@ class SmartIrrigationCoordinator(DataUpdateCoordinator):
         # experiment with subscriptions on sensors
         self._sensor_subscriptions = []
         self._sensors_to_subscribe_to = []
+
+        # Observed watering (closed-loop bucket): subscription to linked valve
+        # state changes, the currently-tracked entity set, and per-zone "valve
+        # opened at" timestamps. Wired up by async_setup_observed_watering.
+        self._observed_unsub = None
+        self._observed_entities = frozenset()
+        self._observed_on_since = {}
+        self._observed_flow_start = {}
+        self._observed_zone_by_entity = {}
 
         # set up sunrise tracking
         _LOGGER.debug("calling register start event from init")
@@ -601,6 +614,9 @@ class SmartIrrigationCoordinator(DataUpdateCoordinator):
         # handle auto clear changes
         await self.set_up_auto_clear_time(data)
         await self.store.async_update_config(data)
+        # Re-evaluate the observed-watering subscription (the feature toggle may
+        # have just changed).
+        await self.async_setup_observed_watering()
         async_dispatcher_send(self.hass, const.DOMAIN + "_config_updated")
 
     async def async_apply_weather_service(self, use, service, api_key):
@@ -2610,6 +2626,9 @@ class SmartIrrigationCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("calling register start event from async_update_zone_config")
         await self.register_start_event()
 
+        # A zone's linked valve entity may have changed; refresh the observer.
+        await self.async_setup_observed_watering()
+
     async def register_start_event(self):
         """Register a callback to fire the irrigation start event before sunrise based on total duration of enabled zones."""
         # sun_state = self.hass.states.get("sun.sun")
@@ -3170,6 +3189,9 @@ class SmartIrrigationCoordinator(DataUpdateCoordinator):
         # remove subscriptions for coordinator
         while self._subscriptions:
             self._subscriptions.pop()()
+
+        # stop watching linked valves (closed-loop bucket)
+        self.async_teardown_observed_watering()
 
     async def async_delete_config(self):
         """Wipe Smart Irrigation storage."""

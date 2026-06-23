@@ -54,7 +54,9 @@ import {
   ZONE_BUCKET,
   ZONE_DRAINAGE_RATE,
   ZONE_DURATION,
+  ZONE_FLOW_SENSOR,
   ZONE_LEAD_TIME,
+  ZONE_LINKED_ENTITY,
   ZONE_MAPPING,
   ZONE_MAXIMUM_BUCKET,
   ZONE_MAXIMUM_DURATION,
@@ -984,6 +986,30 @@ class SmartIrrigationViewZones extends SubscribeMixin(LitElement) {
                     }),
                   0.1,
                 )}
+                ${this.config?.observed_watering_enabled
+                  ? this._entityRow(
+                      localize("panels.zones.labels.linked-entity", lang),
+                      zone.linked_entity,
+                      ["switch", "valve", "input_boolean", "binary_sensor"],
+                      (v) =>
+                        this.handleEditZone(index, {
+                          ...zone,
+                          [ZONE_LINKED_ENTITY]: v || undefined,
+                        }),
+                    )
+                  : ""}
+                ${this.config?.observed_watering_enabled && zone.linked_entity
+                  ? this._entityRow(
+                      localize("panels.zones.labels.flow-sensor", lang),
+                      zone.flow_sensor,
+                      ["sensor"],
+                      (v) =>
+                        this.handleEditZone(index, {
+                          ...zone,
+                          [ZONE_FLOW_SENSOR]: v || undefined,
+                        }),
+                    )
+                  : ""}
                 ${this._numRow(
                   localize("panels.zones.labels.lead-time", lang),
                   "s",
@@ -1199,6 +1225,27 @@ class SmartIrrigationViewZones extends SubscribeMixin(LitElement) {
             <path d=${mdiMenuDown}></path>
           </svg>
         </div>
+      </div>
+    `;
+  }
+
+  private _entityRow(
+    label: string,
+    value: string | undefined,
+    includeDomains: string[],
+    onCommit: (v: string) => void,
+  ): TemplateResult {
+    return html`
+      <div class="setting-row">
+        <div class="setting-label">${label}</div>
+        <ha-entity-picker
+          class="field"
+          .hass=${this.hass}
+          .value=${value || ""}
+          .includeDomains=${includeDomains}
+          allow-custom-entity
+          @value-changed=${(e: CustomEvent) => onCommit(e.detail?.value || "")}
+        ></ha-entity-picker>
       </div>
     `;
   }

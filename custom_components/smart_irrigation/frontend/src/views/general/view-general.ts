@@ -443,13 +443,16 @@ export class SmartIrrigationViewGeneral extends SubscribeMixin(LitElement) {
       // Days Between Irrigation Card
       const r8 = this.renderDaysBetweenIrrigationCard();
 
+      // Observed Watering (closed-loop bucket) Card
+      const r9 = this.renderObservedWateringCard();
+
       const r = html`<ha-card
           header="${localize("panels.general.title", this.hass.language)}"
         >
           <div class="card-content">
             ${localize("panels.general.description", this.hass.language)}
           </div> </ha-card
-        >${r2}${r1}${r3}${r4}${r5}${r6}${r7}${r8}`;
+        >${r2}${r1}${r3}${r4}${r5}${r6}${r7}${r8}${r9}`;
 
       return r;
     }
@@ -751,6 +754,34 @@ export class SmartIrrigationViewGeneral extends SubscribeMixin(LitElement) {
                 0.1,
               )
             : ""}
+        </div>
+      </ha-card>
+    `;
+  }
+
+  renderObservedWateringCard() {
+    if (!this.config || !this.data || !this.hass) return html``;
+
+    return html`
+      <ha-card
+        header="${localize("observed_watering.title", this.hass.language)}"
+      >
+        <div class="card-content">
+          ${localize("observed_watering.description", this.hass.language)}
+        </div>
+        <div class="card-content">
+          <div class="setting-row">
+            <div class="setting-label">
+              ${localize("observed_watering.enabled_label", this.hass.language)}
+            </div>
+            <ha-switch
+              .checked=${this.config.observed_watering_enabled}
+              @change=${(e: Event) =>
+                this.handleConfigChange({
+                  observed_watering_enabled: (e.target as any).checked,
+                })}
+            ></ha-switch>
+          </div>
         </div>
       </ha-card>
     `;
