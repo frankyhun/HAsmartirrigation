@@ -366,6 +366,9 @@ MAPPING_CONF_AGGREGATE_OPTIONS = [
 RETRIEVED_AT = "retrieved"  # on weatherdata
 
 EVENT_IRRIGATE_START = "start_irrigation_all_zones"
+# Fired (as smart_irrigation_zone_problem) when a direct-control valve fails to
+# open, so users can wire a notification automation.
+EVENT_ZONE_PROBLEM = "zone_problem"
 
 UNIT_M2 = "m<sup>2</sup>"
 UNIT_SQ_FT = "sq ft"

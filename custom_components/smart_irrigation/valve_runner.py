@@ -40,6 +40,16 @@ _LOGGER = logging.getLogger(__name__)
 # window, covering valve-confirm lag and the final close event.
 SI_VALVE_SUPPRESS_MARGIN = 30
 
+# How long to wait for a freshly-opened valve to report an on-state before
+# treating the run as a failure, and how often to poll.
+VALVE_CONFIRM_TIMEOUT = 8.0
+VALVE_CONFIRM_POLL = 1.0
+
+# Entity states that count as "the valve actually opened".
+_VALVE_ON_STATES = ("on", "open", "opening")
+# States that mean "no usable reading" (a write-only valve we cannot verify).
+_VALVE_UNUSABLE = (None, "", "unknown", "unavailable")
+
 
 class ValveRunnerMixin:
     """Open/close linked valves directly and credit the bucket for the run."""
@@ -55,6 +65,45 @@ class ValveRunnerMixin:
         if domain == "valve":
             return domain, "open_valve", "close_valve"
         return domain, "turn_on", "turn_off"
+
+    async def _confirm_valve_running(self, entity_id: str):
+        """Wait briefly for a freshly-opened valve to report an on-state.
+
+        Returns True if it reaches an on-state, False if it stays explicitly off
+        (a real failure: the run must not be credited), or None when the entity
+        is unreadable (a write-only valve we cannot verify, so do not penalise
+        it -- proceed as usual).
+        """
+        deadline = self.hass.loop.time() + VALVE_CONFIRM_TIMEOUT
+        while self.hass.loop.time() < deadline:
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.state in _VALVE_ON_STATES:
+                return True
+            await asyncio.sleep(VALVE_CONFIRM_POLL)
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in _VALVE_UNUSABLE:
+            return None
+        return state.state in _VALVE_ON_STATES
+
+    def _report_valve_problem(self, zone: dict, entity_id: str, reason: str) -> None:
+        """Log and broadcast a per-zone valve problem (e.g. it never opened)."""
+        zone_id = int(zone.get(const.ZONE_ID))
+        _LOGGER.warning(
+            "Direct valve control: zone %s problem (%s) on valve %s",
+            zone_id,
+            reason,
+            entity_id,
+        )
+        # Fire an event so users can wire a notification automation.
+        self.hass.bus.async_fire(
+            f"{const.DOMAIN}_{const.EVENT_ZONE_PROBLEM}",
+            {
+                "zone_id": zone_id,
+                "zone": zone.get(const.ZONE_NAME),
+                "entity_id": entity_id,
+                "reason": reason,
+            },
+        )
 
     def _note_si_valve(self, zone_id, seconds: float = 0.0) -> None:
         """Flag that Smart Irrigation itself is driving this zone's valve.
@@ -156,19 +205,32 @@ class ValveRunnerMixin:
         if not entity_id or duration <= 0:
             return
         domain, on_svc, off_svc = self._valve_services(entity_id)
-        started = dt_util.utcnow()
-        self._note_si_valve(zone_id, duration)
-        await self._add_active_run(zone_id, entity_id, started, duration)
+        # Suppress the observer from the moment we send the open command (it must
+        # cover the confirm poll and the whole run).
+        self._note_si_valve(zone_id, duration + VALVE_CONFIRM_TIMEOUT)
         _LOGGER.info(
             "Direct valve control: opening %s for zone %s (%.0fs)",
             entity_id,
             zone_id,
             duration,
         )
-        try:
+        await self.hass.services.async_call(domain, on_svc, {"entity_id": entity_id})
+
+        # Confirm the valve actually opened before counting/crediting: a valve
+        # that never opens would otherwise clear the deficit while running dry
+        # (and the missed water silently rolls over to the next day). Only an
+        # explicit "still off" aborts; an unverifiable (write-only) valve runs.
+        if await self._confirm_valve_running(entity_id) is False:
             await self.hass.services.async_call(
-                domain, on_svc, {"entity_id": entity_id}
+                domain, off_svc, {"entity_id": entity_id}
             )
+            self._report_valve_problem(zone, entity_id, "valve_did_not_open")
+            return
+
+        # Start counting only once the valve is confirmed open.
+        started = dt_util.utcnow()
+        await self._add_active_run(zone_id, entity_id, started, duration)
+        try:
             await asyncio.sleep(duration)
         finally:
             await self.hass.services.async_call(
@@ -272,19 +334,28 @@ class ValveRunnerMixin:
             return
 
         remaining = duration - elapsed
-        self._note_si_valve(zone_id, remaining)
+        self._note_si_valve(zone_id, remaining + VALVE_CONFIRM_TIMEOUT)
         _LOGGER.info(
             "Direct valve control: zone %s resuming, %.0fs of %.0fs remaining",
             zone_id,
             remaining,
             duration,
         )
-        try:
-            # Re-assert open: the valve should still be on after an HA reboot,
-            # but make sure (idempotent).
+        # Re-assert open: the valve should still be on after an HA reboot, but a
+        # power cut may have reset it. Confirm before finishing/crediting.
+        await self.hass.services.async_call(domain, on_svc, {"entity_id": entity_id})
+        if await self._confirm_valve_running(entity_id) is False:
             await self.hass.services.async_call(
-                domain, on_svc, {"entity_id": entity_id}
+                domain, off_svc, {"entity_id": entity_id}
             )
+            await self._remove_active_run(zone_id)
+            self._report_valve_problem(
+                self.store.get_zone(zone_id) or {const.ZONE_ID: zone_id},
+                entity_id,
+                "valve_did_not_open",
+            )
+            return
+        try:
             await asyncio.sleep(remaining)
         finally:
             await self.hass.services.async_call(

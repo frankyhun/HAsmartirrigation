@@ -41,14 +41,32 @@ def _no_sleep(monkeypatch):
     )
 
 
-def _make_hass(metric=True):
+def _make_hass(metric=True, valve_state="on"):
+    """A hass double. ``valve_state`` is what the linked valve reports back:
+    "on" (opened), "off" (failed to open), or None (write-only, unverifiable).
+    """
     hass = Mock()
     hass.config = Mock()
     hass.config.units = METRIC_SYSTEM if metric else Mock()
+    # A clock that advances on every read, so the confirm poll can time out.
+    clock = {"t": 1000.0}
+
+    def _now():
+        clock["t"] += 1.0
+        return clock["t"]
+
     hass.loop = Mock()
-    hass.loop.time = lambda: 1000.0
+    hass.loop.time = _now
     hass.services = Mock()
     hass.services.async_call = AsyncMock()
+    hass.bus = Mock()
+    hass.bus.async_fire = Mock()
+
+    def _get(entity_id):
+        return None if valve_state is None else SimpleNamespace(state=valve_state)
+
+    hass.states = Mock()
+    hass.states.get = _get
     return hass
 
 
@@ -155,6 +173,48 @@ async def test_run_one_valve_opens_waits_closes_credits():
     # run persisted then cleared
     assert coord._active_valve_runs == {}
     # bucket credited for the full 300 s run (1 mm) -> -3 -> -2
+    args = coord.store.async_update_zone.await_args.args
+    assert args[1][const.ZONE_BUCKET] == pytest.approx(-2.0)
+
+
+async def test_confirm_valve_running_states():
+    """on -> True, off -> False, unreadable -> None."""
+    coord_on = _Coordinator(_make_hass(valve_state="on"), _make_store(_zone()))
+    assert await coord_on._confirm_valve_running("switch.valve") is True
+
+    coord_off = _Coordinator(_make_hass(valve_state="off"), _make_store(_zone()))
+    assert await coord_off._confirm_valve_running("switch.valve") is False
+
+    coord_unv = _Coordinator(_make_hass(valve_state=None), _make_store(_zone()))
+    assert await coord_unv._confirm_valve_running("switch.valve") is None
+
+
+async def test_run_aborts_and_reports_when_valve_stays_off():
+    """A valve that never opens is not credited, and a problem is broadcast."""
+    zone = _zone()
+    hass = _make_hass(valve_state="off")
+    coord = _Coordinator(hass, _make_store(zone))
+
+    await coord._run_one_valve(zone)
+
+    # Opened then closed, but never counted/credited.
+    coord.store.async_update_zone.assert_not_awaited()
+    assert coord._active_valve_runs == {}
+    # A zone_problem event was fired.
+    fired = [c.args[0] for c in hass.bus.async_fire.call_args_list]
+    assert any("zone_problem" in name for name in fired)
+
+
+async def test_run_proceeds_when_valve_is_write_only():
+    """An unverifiable (write-only) valve is given the benefit of the doubt."""
+    zone = _zone()
+    hass = _make_hass(valve_state=None)
+    coord = _Coordinator(hass, _make_store(zone))
+
+    await coord._run_one_valve(zone)
+
+    # Credited (we cannot prove it failed, so we proceed).
+    coord.store.async_update_zone.assert_awaited()
     args = coord.store.async_update_zone.await_args.args
     assert args[1][const.ZONE_BUCKET] == pytest.approx(-2.0)
 
