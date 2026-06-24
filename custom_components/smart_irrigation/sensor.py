@@ -15,6 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.util import slugify
+from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from . import const
 from .performance import async_timer
@@ -333,18 +334,29 @@ class SmartIrrigationZoneEntity(SensorEntity, RestoreEntity):
                 self._last_calculated
             )
 
+        ha_metric = self._hass.config.units is METRIC_SYSTEM
+        depth_unit = const.UNIT_MM if ha_metric else const.UNIT_INCH
+        area_unit = const.UNIT_M2 if ha_metric else const.UNIT_SQ_FT
+        flow_unit = const.UNIT_LPM if ha_metric else const.UNIT_GPM
+
         return {
             "id": self._id,
             "size": self._size,
+            "size_unit": area_unit,
             "throughput": self._throughput,
+            "throughput_unit": flow_unit,
             "drainage_rate": self._drainage_rate,
+            "drainage_rate_unit": f"{depth_unit}/h",
             "current_drainage": self._current_drainage,
+            "current_drainage_unit": depth_unit,
             "maximum_bucket": self._maximum_bucket,
+            "maximum_bucket_unit": depth_unit,
             "multiplier": self._multiplier,
             "lead_time": self._lead_time,
             "maximum_duration": self._maximum_duration,
             "state": self._state,
             "bucket": self._bucket,
+            "bucket_unit": depth_unit,
             "last_updated": self._last_updated_formatted,
             "last_calculated": self._last_calculated_formatted,
             "number_of_data_points": self._number_of_data_points,
