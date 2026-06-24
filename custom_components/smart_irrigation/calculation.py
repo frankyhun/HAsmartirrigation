@@ -847,9 +847,9 @@ class CalculationMixin:
         data[const.ZONE_BUCKET] = newbucket
         data[const.ZONE_ET_DEFICIENCY] = et_deficiency
         if not ha_config_is_metric:
-            # bucket, delta and et_deficiency are computed in mm internally;
-            # store them in the HA unit (inches) so the sensor and panel show a
-            # value consistent with the rest of the imperial UI.
+            # bucket, delta, et_deficiency and current_drainage are computed in
+            # mm internally; store them in the HA unit (inches) so the sensors
+            # and panel show a value consistent with the rest of the imperial UI.
             data[const.ZONE_BUCKET] = convert_between(
                 const.UNIT_MM, const.UNIT_INCH, data[const.ZONE_BUCKET]
             )
@@ -858,6 +858,9 @@ class CalculationMixin:
             )
             data[const.ZONE_ET_DEFICIENCY] = convert_between(
                 const.UNIT_MM, const.UNIT_INCH, data[const.ZONE_ET_DEFICIENCY]
+            )
+            data[const.ZONE_CURRENT_DRAINAGE] = convert_between(
+                const.UNIT_MM, const.UNIT_INCH, data[const.ZONE_CURRENT_DRAINAGE]
             )
         data[const.ZONE_DURATION] = duration
         data[const.ZONE_EXPLANATION] = explanation

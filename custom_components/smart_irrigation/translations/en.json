@@ -3,6 +3,18 @@
     "sensor": {
       "duration": {
         "name": "Duration"
+      },
+      "bucket": {
+        "name": "Bucket"
+      },
+      "et_value": {
+        "name": "Applied ET"
+      },
+      "et_deficiency": {
+        "name": "Daily ET deficiency"
+      },
+      "current_drainage": {
+        "name": "Current drainage"
       }
     }
   },
