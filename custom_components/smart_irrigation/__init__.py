@@ -266,7 +266,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await _migrate_duration_unique_ids(hass, entry, store)
 
     _LOGGER.info("Calling async_forward_entry_setups")
-    await hass.config_entries.async_forward_entry_setups(entry, [PLATFORM, "number"])
+    await hass.config_entries.async_forward_entry_setups(
+        entry, [PLATFORM, "number", "button"]
+    )
     _LOGGER.info("Finished calling async_forward_entry_setups")
 
     # Every entity platform is now subscribed to "_register_entity"; replay the
@@ -343,6 +345,7 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         await asyncio.gather(
             hass.config_entries.async_forward_entry_unload(entry, PLATFORM),
             hass.config_entries.async_forward_entry_unload(entry, "number"),
+            hass.config_entries.async_forward_entry_unload(entry, "button"),
         )
     )
     if not unload_ok:

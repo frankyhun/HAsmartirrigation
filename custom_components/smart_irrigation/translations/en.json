@@ -21,6 +21,17 @@
       "multiplier": {
         "name": "Multiplier"
       }
+    },
+    "button": {
+      "calculate": {
+        "name": "Calculate"
+      },
+      "reset_bucket": {
+        "name": "Reset bucket"
+      },
+      "irrigate_now": {
+        "name": "Irrigate now"
+      }
     }
   },
   "config": {
