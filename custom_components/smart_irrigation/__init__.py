@@ -93,7 +93,7 @@ async def _migrate_duration_unique_ids(hass: HomeAssistant, entry, store) -> Non
     try:
         zone_ids = list(getattr(store, "zones", None) or [])
     except TypeError:  # store not fully initialized (e.g. mocked) -> nothing to migrate
-        zone_ids = []
+        return
     slug_to_zone_id = {}
     for zone_id in zone_ids:
         zone = store.get_zone(zone_id)
@@ -101,21 +101,43 @@ async def _migrate_duration_unique_ids(hass: HomeAssistant, entry, store) -> Non
         if name:
             slug_to_zone_id.setdefault(slugify(name), zone.get(const.ZONE_ID, zone_id))
 
-    @callback
-    def _migrator(reg_entry):
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    # Every unique_id currently in use for this entry, so we never rewrite a
+    # legacy id onto one that is already taken (which would hard-fail setup).
+    taken = {e.unique_id for e in entries}
+
+    for reg_entry in entries:
         uid = reg_entry.unique_id
         if (
             reg_entry.domain != PLATFORM
             or not isinstance(uid, str)
             or not uid.startswith(legacy_prefix)
         ):
-            return None
+            continue
         zone_id = slug_to_zone_id.get(uid[len(legacy_prefix) :])
         if zone_id is None:
-            return None
-        return {"new_unique_id": f"{const.DOMAIN}_{zone_id}_duration"}
-
-    await er.async_migrate_entries(hass, entry.entry_id, _migrator)
+            continue
+        target = f"{const.DOMAIN}_{zone_id}_duration"
+        if target == uid:
+            continue
+        if target in taken:
+            # The target id already exists -- a stale duplicate left by a
+            # downgrade/upgrade cycle. Remove this legacy duplicate instead of
+            # colliding, so the integration always sets up.
+            _LOGGER.warning(
+                "Smart Irrigation: removing duplicate legacy duration entity "
+                "%s (unique_id %s); %s already exists",
+                reg_entry.entity_id,
+                uid,
+                target,
+            )
+            registry.async_remove(reg_entry.entity_id)
+            taken.discard(uid)
+            continue
+        registry.async_update_entity(reg_entry.entity_id, new_unique_id=target)
+        taken.discard(uid)
+        taken.add(target)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
