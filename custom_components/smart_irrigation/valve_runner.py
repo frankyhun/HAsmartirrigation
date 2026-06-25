@@ -191,19 +191,69 @@ class ValveRunnerMixin:
             len(eligible),
             sequencing,
         )
-        if sequencing == const.CONF_ZONE_SEQUENCING_PARALLEL:
-            await asyncio.gather(*(self._run_one_valve(z) for z in eligible))
-        else:
-            for zone in eligible:
-                await self._run_one_valve(zone)
 
-    async def _run_one_valve(self, zone: dict) -> None:
-        """Open one zone's valve, hold it for its duration, close it, credit."""
+        # Announce the start, with the zones about to be watered, so an
+        # automation can send a "watering started" notification.
+        self.hass.bus.async_fire(
+            f"{const.DOMAIN}_{const.EVENT_IRRIGATE_STARTED}",
+            {
+                "sequencing": sequencing,
+                "zones": [
+                    {
+                        "zone_id": int(z.get(const.ZONE_ID)),
+                        "zone": z.get(const.ZONE_NAME),
+                        "seconds": int(z.get(const.ZONE_DURATION) or 0),
+                    }
+                    for z in eligible
+                ],
+            },
+        )
+
+        if sequencing == const.CONF_ZONE_SEQUENCING_PARALLEL:
+            results = await asyncio.gather(*(self._run_one_valve(z) for z in eligible))
+        else:
+            results = [await self._run_one_valve(zone) for zone in eligible]
+
+        # Fire a single end-of-watering summary so one automation can report.
+        results = [r for r in results if r]
+        self.hass.bus.async_fire(
+            f"{const.DOMAIN}_{const.EVENT_IRRIGATE_FINISHED}",
+            {
+                "zones": [
+                    {
+                        "zone_id": r["zone_id"],
+                        "zone": r["zone"],
+                        "seconds": r["seconds"],
+                        "volume_l": r.get("volume_l", 0),
+                        "bucket": r.get("bucket", 0),
+                    }
+                    for r in results
+                    if r["ran"]
+                ],
+                "problems": [
+                    {
+                        "zone_id": r["zone_id"],
+                        "zone": r["zone"],
+                        "reason": r["problem"],
+                    }
+                    for r in results
+                    if not r["ran"]
+                ],
+            },
+        )
+
+    async def _run_one_valve(self, zone: dict):
+        """Open one zone's valve, hold it for its duration, close it, credit.
+
+        Returns a result dict ``{zone_id, zone, seconds, ran, problem}`` used to
+        build the end-of-watering summary, or None when there was nothing to do.
+        """
         zone_id = int(zone.get(const.ZONE_ID))
+        zone_name = zone.get(const.ZONE_NAME)
         entity_id = zone.get(const.ZONE_LINKED_ENTITY)
         duration = float(zone.get(const.ZONE_DURATION) or 0)
         if not entity_id or duration <= 0:
-            return
+            return None
         domain, on_svc, off_svc = self._valve_services(entity_id)
         # Suppress the observer from the moment we send the open command (it must
         # cover the confirm poll and the whole run).
@@ -225,7 +275,13 @@ class ValveRunnerMixin:
                 domain, off_svc, {"entity_id": entity_id}
             )
             self._report_valve_problem(zone, entity_id, "valve_did_not_open")
-            return
+            return {
+                "zone_id": zone_id,
+                "zone": zone_name,
+                "seconds": 0,
+                "ran": False,
+                "problem": "valve_did_not_open",
+            }
 
         # Start counting only once the valve is confirmed open.
         started = dt_util.utcnow()
@@ -242,6 +298,29 @@ class ValveRunnerMixin:
         # The valve was held for ``duration``; credit that (a cancelled run never
         # reaches here, so its credit comes from the reboot-resume path instead).
         await self._credit_direct_run(zone_id, duration)
+        zone_after = self.store.get_zone(zone_id) or {}
+        return {
+            "zone_id": zone_id,
+            "zone": zone_name,
+            "seconds": int(duration),
+            "volume_l": round(self._gross_volume_litres(zone, duration), 1),
+            "bucket": round(float(zone_after.get(const.ZONE_BUCKET) or 0.0), 1),
+            "ran": True,
+            "problem": None,
+        }
+
+    def _gross_volume_litres(self, zone: dict, seconds: float) -> float:
+        """Litres actually delivered (throughput x time), for the report."""
+        throughput = zone.get(const.ZONE_THROUGHPUT) or 0.0
+        if throughput <= 0 or seconds <= 0:
+            return 0.0
+        ha_metric = self.hass.config.units is METRIC_SYSTEM
+        tput_lpm = (
+            throughput
+            if ha_metric
+            else convert_between(const.UNIT_GPM, const.UNIT_LPM, throughput)
+        )
+        return tput_lpm * seconds / 60.0
 
     async def _credit_direct_run(self, zone_id: int, elapsed: float) -> None:
         """Credit the bucket for a completed direct run of ``elapsed`` seconds."""

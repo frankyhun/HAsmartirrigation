@@ -381,6 +381,13 @@ MAPPING_CONF_AGGREGATE_OPTIONS = [
 RETRIEVED_AT = "retrieved"  # on weatherdata
 
 EVENT_IRRIGATE_START = "start_irrigation_all_zones"
+# Fired (as smart_irrigation_irrigation_started) when direct valve control
+# begins running the zones, with the list about to be watered.
+EVENT_IRRIGATE_STARTED = "irrigation_started"
+# Fired (as smart_irrigation_irrigation_finished) once direct valve control has
+# finished running every eligible zone, with a per-zone summary, so a single
+# automation can send an end-of-watering report.
+EVENT_IRRIGATE_FINISHED = "irrigation_finished"
 # Fired (as smart_irrigation_zone_problem) when a direct-control valve fails to
 # open, so users can wire a notification automation.
 EVENT_ZONE_PROBLEM = "zone_problem"

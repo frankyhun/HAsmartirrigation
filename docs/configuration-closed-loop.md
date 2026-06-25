@@ -35,9 +35,43 @@ With **Let Smart Irrigation control the valve** on, Smart Irrigation opens each 
 
 > **Safety:** if Home Assistant goes down for a long time during a run, the physical valve stays open and keeps watering, because Home Assistant is no longer there to close it. Give your valve a hardware failsafe (a maximum runtime on the device itself). Smart Irrigation also caps the credited time at the zone's maximum duration.
 
-### Getting notified of a valve problem
+### Events for your own automations
 
-Listen to the `smart_irrigation_zone_problem` event in an automation to be alerted when a valve fails to open. The event data includes `zone_id`, `zone`, `entity_id` and `reason`.
+Direct valve control fires events you can use to notify or react, so you do not need one automation per zone:
+
+- `smart_irrigation_irrigation_started` when a run begins. Data: `sequencing` (`sequential`/`parallel`) and `zones`, a list of `{zone_id, zone, seconds}` about to be watered.
+- `smart_irrigation_irrigation_finished` when the whole run is done. Data: `zones`, a list of `{zone_id, zone, seconds, volume_l, bucket}` that ran (volume delivered and the new bucket level), and `problems`, a list of `{zone_id, zone, reason}` for zones whose valve did not open.
+- `smart_irrigation_zone_problem` the moment a valve fails to open. Data: `zone_id`, `zone`, `entity_id`, `reason`.
+
+Example: a single end-of-watering report for all zones.
+
+```yaml
+alias: Watering report
+triggers:
+  - trigger: event
+    event_type: smart_irrigation_irrigation_finished
+actions:
+  - variables:
+      zones: "{{ trigger.event.data.zones }}"
+      problems: "{{ trigger.event.data.problems }}"
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "{{ '🚨' if problems | count > 0 else '🌱' }} Watering finished"
+      message: >-
+        {% set l = namespace(t=[]) %}
+        {% for z in zones %}
+          {% set l.t = l.t + [z.zone ~ ": " ~ (z.seconds / 60) | round(1) ~ " min, " ~ z.volume_l ~ " L"] %}
+        {% endfor %}
+        {% for p in problems %}
+          {% set l.t = l.t + ["WARNING " ~ p.zone ~ ": " ~ p.reason] %}
+        {% endfor %}
+        {{ l.t | join("\n") }}
+mode: single
+```
+
+> If you previously had one automation per zone that opened the valve and called `reset_bucket`, remove them once direct valve control is on: Smart Irrigation now opens the valves and credits the bucket itself, so the old automations would double up. Keep only report/notification automations like the one above.
+
+The legacy `smart_irrigation_start_irrigation_all_zones` event still fires too (it carries the trigger identity), for setups that drive watering from their own automation or an external executor instead of direct valve control.
 
 ## When does it run? The active start trigger
 
