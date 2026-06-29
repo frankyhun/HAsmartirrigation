@@ -688,10 +688,15 @@ class CalculationMixin:
             self.hass.config.language,
         )
 
-        if maximum_bucket is not None and maximum_bucket > 0:
+        if bucket_plus_delta_capped <= 0:
+            # Deficit: drainage and the max(0, ...) clamp do not apply (see the
+            # `if newbucket > 0` guard above), so the bucket stays negative.
+            # Show the formula that was actually used, without max(0)/min/drainage.
+            explanation += f" [{old_bucket_loc}] + [{delta_loc}] = {old_bucket:.2f}{data[const.ZONE_DELTA]:+.2f} = {newbucket:.2f}.<br/>"
+        elif maximum_bucket is not None and maximum_bucket > 0:
             explanation += f" max(0, min([{old_bucket_loc}] + [{delta_loc}], {max_bucket_loc}) - [{drainage_loc}]) = max(0, min({old_bucket:.2f}{data[const.ZONE_DELTA]:+.2f}, {maximum_bucket:.1f}) - {drainage:.2f}) = {newbucket:.2f}.<br/>"
         else:
-            explanation += f" [{old_bucket_loc}] + [{delta_loc}] - [{drainage_loc}] = {old_bucket:.2f} + {data[const.ZONE_DELTA]:.2f} - {drainage:.2f} = {newbucket:.2f}.<br/>"
+            explanation += f" max(0, [{old_bucket_loc}] + [{delta_loc}] - [{drainage_loc}]) = max(0, {old_bucket:.2f} + {data[const.ZONE_DELTA]:.2f} - {drainage:.2f}) = {newbucket:.2f}.<br/>"
 
         if newbucket < 0:
             # calculate duration
