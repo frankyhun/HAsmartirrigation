@@ -157,17 +157,57 @@ class SmartIrrigationZoneWateringNowBinarySensor(SmartIrrigationZoneBinarySensor
     _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_icon = "mdi:sprinkler-variant"
 
+    def __init__(self, hass, entity_id, zone_id, zone_name) -> None:
+        """Initialize, with no linked valve tracked yet."""
+        super().__init__(hass, entity_id, zone_id, zone_name)
+        self._linked = None
+        self._unsub_valve = None
+
     async def async_added_to_hass(self) -> None:
-        """Track the linked valve's state (set once at add time)."""
+        """Track the linked valve, and rebind it when the zone config changes.
+
+        The linked entity is usually set (or changed) after the zone entity
+        already exists, so binding only once at add time missed it entirely and
+        the sensor stayed "Not Running" (#768). Re-resolve it on every zone
+        config update.
+        """
         await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self._hass,
+                const.DOMAIN + "_config_updated",
+                self._async_config_updated,
+            )
+        )
+        self.async_on_remove(self._unsubscribe_valve)
+        self._resubscribe()
+
+    @callback
+    def _async_config_updated(self, zone_id=None) -> None:
+        if zone_id is None or zone_id == self._zone_id:
+            self._resubscribe()
+            self.async_write_ha_state()
+
+    @callback
+    def _unsubscribe_valve(self) -> None:
+        if self._unsub_valve is not None:
+            self._unsub_valve()
+            self._unsub_valve = None
+
+    @callback
+    def _resubscribe(self) -> None:
+        """(Re)bind the state tracker to the zone's current linked valve."""
         zone = self._zone()
-        self._linked = zone.get(const.ZONE_LINKED_ENTITY) if zone else None
-        if self._linked:
-            self.async_on_remove(
-                async_track_state_change_event(
+        if zone:
+            self._zone_name = zone.get(const.ZONE_NAME, self._zone_name)
+        linked = zone.get(const.ZONE_LINKED_ENTITY) if zone else None
+        if linked != self._linked:
+            self._unsubscribe_valve()
+            self._linked = linked
+            if self._linked:
+                self._unsub_valve = async_track_state_change_event(
                     self._hass, [self._linked], self._async_valve_changed
                 )
-            )
         self._recompute()
 
     @callback
