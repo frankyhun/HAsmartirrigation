@@ -870,3 +870,46 @@ class CalculationMixin:
         data[const.ZONE_DURATION] = duration
         data[const.ZONE_EXPLANATION] = explanation
         return data
+
+    def duration_from_bucket(self, zone: dict, bucket_native: float) -> float:
+        """Duration (seconds) implied by a zone's current bucket value.
+
+        Mirrors the bucket -> duration maths in ``calculate_module`` so callers
+        that move the bucket outside a full calculation (observed watering
+        crediting the bucket, #772) can refresh the zone duration consistently.
+        A bucket at or above zero means no irrigation is needed, so 0.
+
+        ``bucket_native`` is in the user's unit (inches when imperial, mm when
+        metric), like the stored ``ZONE_BUCKET``.
+        """
+        ha_config_is_metric = self.hass.config.units is METRIC_SYSTEM
+        bucket_mm = (
+            bucket_native
+            if ha_config_is_metric
+            else convert_between(const.UNIT_INCH, const.UNIT_MM, bucket_native)
+        )
+        if bucket_mm >= 0:
+            return 0
+
+        tput = zone.get(const.ZONE_THROUGHPUT)
+        sz = zone.get(const.ZONE_SIZE)
+        if not tput or not sz:
+            return 0
+        if not ha_config_is_metric:
+            tput = convert_between(const.UNIT_GPM, const.UNIT_LPM, tput)
+            sz = convert_between(const.UNIT_SQ_FT, const.UNIT_M2, sz)
+        precipitation_rate = (tput * 60) / sz
+        duration = abs(bucket_mm) / precipitation_rate * 3600
+        duration = zone.get(const.ZONE_MULTIPLIER) * duration
+
+        maximum_duration = zone.get(const.ZONE_MAXIMUM_DURATION)
+        if (
+            maximum_duration is not None
+            and maximum_duration >= 0
+            and duration > maximum_duration
+        ):
+            duration = maximum_duration
+
+        if duration > 0.0:
+            duration = round(zone.get(const.ZONE_LEAD_TIME) + duration)
+        return duration

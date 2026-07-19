@@ -9,11 +9,16 @@ import pytest
 from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from custom_components.smart_irrigation import const
+from custom_components.smart_irrigation.calculation import CalculationMixin
 from custom_components.smart_irrigation.observed_watering import ObservedWateringMixin
 
 
-class _Coordinator(ObservedWateringMixin):
-    """Minimal host exposing the mixin's collaborators (store, hass)."""
+class _Coordinator(ObservedWateringMixin, CalculationMixin):
+    """Minimal host exposing the mixin's collaborators (store, hass).
+
+    Also mixes in ``CalculationMixin`` so the credit path can call
+    ``duration_from_bucket`` (the coordinator inherits both in production).
+    """
 
     def __init__(self, hass, store):
         self.hass = hass
@@ -56,6 +61,10 @@ def _zone(**overrides):
         const.ZONE_BUCKET: -3.0,
         const.ZONE_MAXIMUM_BUCKET: 24.0,
         const.ZONE_LINKED_ENTITY: "switch.valve",
+        # Needed by duration_from_bucket (recomputed on credit, #772).
+        const.ZONE_MULTIPLIER: 1.0,
+        const.ZONE_MAXIMUM_DURATION: 3600,
+        const.ZONE_LEAD_TIME: 0,
     }
     zone.update(overrides)
     return zone
@@ -71,9 +80,7 @@ def _make_store(zone, *, enabled=True):
 
 
 def _sensor_state(value, unit):
-    return SimpleNamespace(
-        state=value, attributes={"unit_of_measurement": unit}
-    )
+    return SimpleNamespace(state=value, attributes={"unit_of_measurement": unit})
 
 
 def _open_event(entity="switch.valve"):
@@ -107,6 +114,33 @@ async def test_credit_metric_math():
     args = coord.store.async_update_zone.await_args.args
     assert args[0] == 0
     assert args[1][const.ZONE_BUCKET] == pytest.approx(-2.0)
+
+
+async def test_credit_recomputes_duration():
+    """Crediting refreshes the duration from the new bucket (#772).
+
+    bucket -2.0 mm, PR = 10*60/50 = 12 mm/h -> 2/12*3600 = 600 s.
+    """
+    zone = _zone()
+    coord = _Coordinator(_make_hass(), _make_store(zone))
+
+    await coord._credit_observed_watering(0, 300)
+
+    args = coord.store.async_update_zone.await_args.args
+    assert args[1][const.ZONE_DURATION] == pytest.approx(600)
+
+
+async def test_credit_resets_duration_to_zero_when_bucket_non_negative():
+    """A run that fills the bucket to >= 0 leaves no duration."""
+    zone = _zone(bucket=-0.5)
+    coord = _Coordinator(_make_hass(), _make_store(zone))
+
+    # 300 s -> +1.0 mm lands the bucket at +0.5 (no irrigation needed).
+    await coord._credit_observed_watering(0, 300)
+
+    args = coord.store.async_update_zone.await_args.args
+    assert args[1][const.ZONE_BUCKET] == pytest.approx(0.5)
+    assert args[1][const.ZONE_DURATION] == 0
 
 
 async def test_credit_clamps_to_maximum_bucket():

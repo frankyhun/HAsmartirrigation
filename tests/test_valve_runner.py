@@ -9,12 +9,17 @@ import pytest
 from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from custom_components.smart_irrigation import const
+from custom_components.smart_irrigation.calculation import CalculationMixin
 from custom_components.smart_irrigation.observed_watering import ObservedWateringMixin
 from custom_components.smart_irrigation.valve_runner import ValveRunnerMixin
 
 
-class _Coordinator(ObservedWateringMixin, ValveRunnerMixin):
-    """Minimal host exposing the runner's collaborators."""
+class _Coordinator(ObservedWateringMixin, ValveRunnerMixin, CalculationMixin):
+    """Minimal host exposing the runner's collaborators.
+
+    Includes ``CalculationMixin`` so the shared credit path can recompute the
+    duration from the bucket (#772), as the real coordinator does.
+    """
 
     def __init__(self, hass, store):
         self.hass = hass
@@ -80,6 +85,7 @@ def _zone(**overrides):
         const.ZONE_BUCKET: -3.0,
         const.ZONE_MAXIMUM_BUCKET: 24.0,
         const.ZONE_MAXIMUM_DURATION: 3600,
+        const.ZONE_LEAD_TIME: 0,
         const.ZONE_DURATION: 300,
         const.ZONE_STATE: const.ZONE_STATE_AUTOMATIC,
         const.ZONE_LINKED_ENTITY: "switch.valve",
@@ -148,9 +154,7 @@ def test_eligible_zones_filtering():
     ids = {int(z[const.ZONE_ID]) for z in coord._eligible_direct_zones(zones, None)}
     assert ids == {0}
     # Restricting to a target set.
-    ids2 = {
-        int(z[const.ZONE_ID]) for z in coord._eligible_direct_zones(zones, [0, 2])
-    }
+    ids2 = {int(z[const.ZONE_ID]) for z in coord._eligible_direct_zones(zones, [0, 2])}
     assert ids2 == {0}
 
 
@@ -165,9 +169,9 @@ async def test_run_one_valve_opens_waits_closes_credits():
     assert ("switch", "turn_on", {"entity_id": "switch.valve"}) in calls
     assert ("switch", "turn_off", {"entity_id": "switch.valve"}) in calls
     # turn_on before turn_off
-    assert calls.index(("switch", "turn_on", {"entity_id": "switch.valve"})) < calls.index(
-        ("switch", "turn_off", {"entity_id": "switch.valve"})
-    )
+    assert calls.index(
+        ("switch", "turn_on", {"entity_id": "switch.valve"})
+    ) < calls.index(("switch", "turn_off", {"entity_id": "switch.valve"}))
     # observer-suppression marker set into the future
     assert coord._si_driven_until[0] > hass.loop.time()
     # run persisted then cleared
@@ -231,9 +235,7 @@ async def test_run_parallel_opens_all():
     z0 = _zone(id=0, linked_entity="switch.a")
     z1 = _zone(id=1, linked_entity="switch.b")
     hass = _make_hass()
-    coord = _Coordinator(
-        hass, _make_store(z0, sequencing="parallel", zones=[z0, z1])
-    )
+    coord = _Coordinator(hass, _make_store(z0, sequencing="parallel", zones=[z0, z1]))
     # get_zone must resolve both for crediting
     coord.store.get_zone = Mock(side_effect=lambda zid: z0 if int(zid) == 0 else z1)
 
