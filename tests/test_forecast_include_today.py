@@ -11,7 +11,14 @@ they need no network mocking or full weather payloads.
 """
 
 import datetime
+import json
 
+import pytest
+
+from custom_components.smart_irrigation import const
+from custom_components.smart_irrigation.weathermodules import (
+    PirateWeatherClient as pw_mod,
+)
 from custom_components.smart_irrigation.weathermodules.OWMClient import OWMClient
 from custom_components.smart_irrigation.weathermodules.PirateWeatherClient import (
     PirateWeatherClient,
@@ -50,3 +57,35 @@ def test_pirate_forecast_includes_today_when_requested() -> None:
     client = PirateWeatherClient("key", "1", 52.0, 5.0, 10, cache_seconds=3600)
     _prime(client)
     assert client.get_forecast_data(include_today=True) == _DAYS
+
+
+def test_pirate_forecast_mean_temperature(monkeypatch) -> None:
+    """Daily mean temp is (max + min) / 2, not max + min / 2 (#769)."""
+    doc = {
+        "daily": {
+            "data": [
+                {
+                    "windSpeed": 1.0,
+                    "pressure": 1000.0,
+                    "humidity": 0.5,
+                    "temperatureMax": 30.0,
+                    "temperatureMin": 20.0,
+                    "dewPoint": 10.0,
+                    "precipAccumulation": 0.0,
+                },
+                {},  # dropped as the last day by range(0, len - 1)
+            ]
+        }
+    }
+
+    class _Resp:
+        status_code = 200
+        text = json.dumps(doc)
+
+    monkeypatch.setattr(pw_mod.requests, "get", lambda *a, **k: _Resp())
+
+    client = PirateWeatherClient("key", "1", 52.0, 5.0, 0)
+    result = client.get_forecast_data(include_today=True)
+
+    # 30 max / 20 min -> mean 25, not 30 + 20/2 = 40.
+    assert result[0][const.MAPPING_TEMPERATURE] == pytest.approx(25.0)
