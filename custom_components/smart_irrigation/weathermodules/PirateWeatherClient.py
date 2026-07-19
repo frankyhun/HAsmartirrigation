@@ -105,8 +105,15 @@ class PirateWeatherClient:  # pylint: disable=invalid-name
         self._cached_data = None
         self._cached_forecast_data = None
 
-    def get_forecast_data(self):
-        """Validate and return forecast data."""
+    def get_forecast_data(self, include_today=False):
+        """Validate and return forecast data.
+
+        By default today's entry (daily[0]) is dropped so the returned list
+        starts at tomorrow, which is the semantics the PyETO forecast averaging
+        relies on. Pass ``include_today=True`` (used by the precipitation-skip
+        check) to keep today at index 0 so "today + tomorrow" can be summed. See
+        #775.
+        """
         if (
             self._cached_forecast_data is None
             or self.override_cache
@@ -134,9 +141,12 @@ class PirateWeatherClient:  # pylint: disable=invalid-name
                 # parse out values from daily
                 if PirateWeather_daily_weather_key_name in doc:
                     parsed_data_total = []
-                    # get the required values from daily.
+                    # get the required values from daily. Parse from index 0
+                    # (today) so the precipitation-skip check can see today; the
+                    # today entry is dropped again on return unless the caller
+                    # asks for it via include_today.
                     for x in range(
-                        1, len(doc[PirateWeather_daily_weather_key_name]["data"]) - 1
+                        0, len(doc[PirateWeather_daily_weather_key_name]["data"]) - 1
                     ):
                         data = doc[PirateWeather_daily_weather_key_name]["data"][x]
                         parsed_data = {}
@@ -177,7 +187,7 @@ class PirateWeatherClient:  # pylint: disable=invalid-name
                         parsed_data_total.append(parsed_data)
                     self._cached_forecast_data = parsed_data_total
                     self._last_time_called = datetime.datetime.now()
-                    return parsed_data_total
+                    return parsed_data_total if include_today else parsed_data_total[1:]
                 _LOGGER.warning(
                     "Ignoring PirateWeather input: missing required key '%s' in PirateWeather API return",
                     PirateWeather_daily_weather_key_name,
@@ -192,7 +202,11 @@ class PirateWeatherClient:  # pylint: disable=invalid-name
         else:
             # return cached_data
             _LOGGER.info("Returning cached PirateWeather forecastdata")
-            return self._cached_forecast_data
+            return (
+                self._cached_forecast_data
+                if include_today
+                else self._cached_forecast_data[1:]
+            )
 
     def relative_to_absolute_pressure(self, pressure, height):
         """Convert relative pressure to absolute pressure."""

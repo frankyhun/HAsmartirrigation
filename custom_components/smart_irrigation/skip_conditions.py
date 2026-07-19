@@ -86,9 +86,11 @@ class SkipConditionsMixin:
                 _LOGGER.debug("Weather client not available")
                 return False
 
-            # Get forecast data (today and tomorrow)
+            # Get forecast data including today (index 0). Without include_today
+            # the list would start at tomorrow and today's forecast rain would
+            # be missed entirely (#775).
             forecast_data = await self.hass.async_add_executor_job(
-                weather_client.get_forecast_data
+                weather_client.get_forecast_data, True
             )
             if not forecast_data:
                 _LOGGER.debug("No forecast data available")
@@ -96,7 +98,7 @@ class SkipConditionsMixin:
 
             # Check precipitation for today and tomorrow
             total_precipitation = 0.0
-            for day_data in forecast_data[:2]:  # Check today and tomorrow only
+            for day_data in forecast_data[:2]:  # today (index 0) + tomorrow
                 if const.MAPPING_PRECIPITATION in day_data:
                     total_precipitation += day_data[const.MAPPING_PRECIPITATION]
 
