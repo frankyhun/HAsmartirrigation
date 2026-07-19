@@ -9,6 +9,7 @@ import { loadHaForm } from "../../load-ha-elements";
 import { Path } from "../../common/navigation";
 import {
   WEATHER_SERVICE_OPEN_METEO,
+  WEATHER_SERVICE_OWM,
   WEATHER_SERVICES_NO_API_KEY,
 } from "../../const";
 import {
@@ -183,6 +184,14 @@ export class SmartIrrigationViewWeatherService extends LitElement {
                         }}
                       />
                     </div>`}
+                ${this._service === WEATHER_SERVICE_OWM
+                  ? html`<div class="ws-note ws-note--hint">
+                      ${localize(
+                        "panels.weatherservice.messages.owm-onecall-hint",
+                        lang,
+                      )}
+                    </div>`
+                  : ""}
               `
             : html`<div class="ws-note">
                 ${localize("panels.weatherservice.messages.no-service", lang)}

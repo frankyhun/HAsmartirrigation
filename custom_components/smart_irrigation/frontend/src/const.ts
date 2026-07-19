@@ -73,6 +73,9 @@ export const MAPPING_WINDSPEED = "Windspeed";
 // The default / canonical Open-Meteo service name (used to show "(via
 // Open-Meteo)" when radiation is filled from it on other providers).
 export const WEATHER_SERVICE_OPEN_METEO = "Open-Meteo";
+// OpenWeatherMap: needs the One Call API 3.0 subscription, so the panel shows a
+// contextual hint when it is selected (see #762).
+export const WEATHER_SERVICE_OWM = "Open Weather Map";
 // Weather services that need no API key (free / keyless).
 export const WEATHER_SERVICES_NO_API_KEY = [WEATHER_SERVICE_OPEN_METEO];
 

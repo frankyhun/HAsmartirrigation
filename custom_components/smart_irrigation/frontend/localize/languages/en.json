@@ -100,7 +100,8 @@
       "messages": {
         "no-service": "No weather service is used — weather data comes from your own sensors only.",
         "saved": "Weather service updated and applied.",
-        "reload-note": "Saving validates the API key against the service and applies the change immediately."
+        "reload-note": "Saving validates the API key against the service and applies the change immediately.",
+        "owm-onecall-hint": "OpenWeatherMap needs the One Call API 3.0 plan (One Call by Call). It is free up to 1000 calls/day but must be activated with a card, and a new key can take up to a couple of hours to work. A plain default key is rejected."
       }
     },
     "backuprestore": {
