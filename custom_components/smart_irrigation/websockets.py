@@ -415,6 +415,35 @@ async def websocket_get_irrigation_info(hass: HomeAssistant, connection, msg):
             else:
                 next_irrigation_start = sunrise_time
 
+        # Account for the "days between irrigation" restriction. The start
+        # triggers fire every day, but on a skip day the watering decision is
+        # negative, so the real next irrigation is pushed back by however many
+        # skip days remain. Without this the Info tab claims "tomorrow" even
+        # when the schedule will actually wait a few days (#763).
+        try:
+            config = await coordinator.store.async_get_config()
+            days_between = config.get(
+                const.CONF_DAYS_BETWEEN_IRRIGATION,
+                const.CONF_DEFAULT_DAYS_BETWEEN_IRRIGATION,
+            )
+            days_since_last = config.get(
+                const.CONF_DAYS_SINCE_LAST_IRRIGATION,
+                const.CONF_DEFAULT_DAYS_SINCE_LAST_IRRIGATION,
+            )
+            if days_between and days_between > 0:
+                # The next trigger evaluates days_since_last against
+                # days_between and only fires once it has caught up, so the
+                # number of remaining skip days is days_between - days_since_last.
+                skip_days = days_between - days_since_last
+                if skip_days > 0 and next_irrigation_start:
+                    next_irrigation_start += datetime.timedelta(days=skip_days)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning(
+                "Failed to apply days-between-irrigation offset to next "
+                "irrigation start: %s",
+                e,
+            )
+
         # Collect irrigation reasons from zones
         reasons = []
         explanations = []
