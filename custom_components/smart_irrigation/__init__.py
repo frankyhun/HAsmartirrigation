@@ -1921,17 +1921,32 @@ class SmartIrrigationCoordinator(
         return res
 
     async def async_remove_entity(self, zone_id: str):
-        """Remove an entity corresponding to the given zone ID from Home Assistant.
+        """Remove the entities and per-zone device for the given zone.
+
+        Removing the per-zone device from the device registry cascades to every
+        entity attached to it (bucket, ET, deficiency, drainage, multiplier,
+        the calculate/reset/irrigate buttons, the binary sensors...). Without it
+        the device and its child entities linger after the zone is deleted, with
+        no way to remove them from the UI (#776).
 
         Args:
-            zone_id: The ID of the zone whose entity should be removed.
+            zone_id: The ID of the zone whose entities/device should be removed.
 
         """
         entity_registry = er.async_get(self.hass)
         zone_id = int(zone_id)
-        entity = self.hass.data[const.DOMAIN]["zones"][zone_id]
-        entity_registry.async_remove(entity.entity_id)
+        entity = self.hass.data[const.DOMAIN]["zones"].get(zone_id)
+        if entity is not None:
+            entity_registry.async_remove(entity.entity_id)
         self.hass.data[const.DOMAIN]["zones"].pop(zone_id, None)
+
+        # Remove the per-zone device, which drops all of its child entities too.
+        device_registry = dr.async_get(self.hass)
+        device = device_registry.async_get_device(
+            identifiers={(const.DOMAIN, f"{self.id}_zone_{zone_id}")}
+        )
+        if device is not None:
+            device_registry.async_remove_device(device.id)
 
     async def async_unload(self):
         """Remove all Smart Irrigation objects."""
