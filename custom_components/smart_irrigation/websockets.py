@@ -345,6 +345,48 @@ async def websocket_get_mappings(hass: HomeAssistant, connection, msg):
     connection.send_result(msg["id"], mappings)
 
 
+def _trigger_start_base_and_offset(selected, total_duration):
+    """Return (base_event, offset_seconds) for the selected start trigger.
+
+    Mirrors the sunrise/sunset offset logic in ``TriggersMixin`` so the Info tab
+    shows when irrigation will actually begin (honouring the trigger the user
+    selected: sunrise/sunset +/- offset, accounting for duration) instead of
+    always assuming "finish at sunrise" (#763). ``base_event`` is "sunrise" or
+    "sunset". The "default" sentinel, solar-azimuth triggers (whose next time is
+    not computed here) and unknown types fall back to the legacy
+    sunrise-minus-duration behaviour.
+    """
+    ttype = selected.get(const.TRIGGER_CONF_TYPE) if selected else None
+    offset_minutes = (
+        selected.get(const.TRIGGER_CONF_OFFSET_MINUTES, 0) if selected else 0
+    )
+    account_for_duration = (
+        selected.get(const.TRIGGER_CONF_ACCOUNT_FOR_DURATION, True)
+        if selected
+        else True
+    )
+
+    if ttype == const.TRIGGER_TYPE_SUNSET:
+        if account_for_duration:
+            offset_seconds = (offset_minutes * 60) - total_duration
+        else:
+            offset_seconds = offset_minutes * 60
+        return "sunset", offset_seconds
+
+    if ttype == const.TRIGGER_TYPE_SUNRISE:
+        if account_for_duration:
+            if offset_minutes == 0:
+                offset_seconds = -total_duration
+            else:
+                offset_seconds = (offset_minutes * 60) - total_duration
+        else:
+            offset_seconds = offset_minutes * 60
+        return "sunrise", offset_seconds
+
+    # default sentinel, solar_azimuth, or unknown -> finish at sunrise.
+    return "sunrise", -total_duration
+
+
 @async_response
 async def websocket_get_irrigation_info(hass: HomeAssistant, connection, msg):
     """Publish irrigation information."""
@@ -372,48 +414,60 @@ async def websocket_get_irrigation_info(hass: HomeAssistant, connection, msg):
                         zone.get(const.ZONE_NAME, f"Zone {zone.get(const.ZONE_ID)}")
                     )
 
-        # Get sunrise time from Home Assistant
+        # Resolve the active start trigger so the displayed start time matches
+        # the trigger the user actually selected, instead of always assuming
+        # "finish at sunrise" (#763).
+        config = await coordinator.store.async_get_config()
+        triggers = config.get(const.CONF_IRRIGATION_START_TRIGGERS, [])
+        active = config.get(
+            const.CONF_ACTIVE_START_TRIGGER, const.CONF_DEFAULT_ACTIVE_START_TRIGGER
+        )
+        selected = None
+        if active and active != const.START_TRIGGER_DEFAULT:
+            selected = next(
+                (t for t in triggers if t.get(const.TRIGGER_CONF_NAME) == active),
+                None,
+            )
+
+        # Parse the sun events we may need (next sunrise and next sunset).
         sun_entity = hass.states.get("sun.sun")
         sunrise_time = None
-        next_irrigation_start = None
-
+        next_setting_time = None
         if sun_entity and sun_entity.attributes:
-            next_rising = sun_entity.attributes.get("next_rising")
-            if next_rising:
+            for attr in ("next_rising", "next_setting"):
+                raw = sun_entity.attributes.get(attr)
+                if not raw:
+                    continue
                 try:
-                    # Parse the sunrise time
-                    if isinstance(next_rising, str):
-                        sunrise_time = datetime.datetime.fromisoformat(
-                            next_rising.replace("Z", "+00:00")
-                        )
-                    else:
-                        sunrise_time = next_rising
-
-                    # Calculate irrigation start time (total_duration seconds before sunrise)
-                    if total_duration > 0:
-                        next_irrigation_start = sunrise_time - datetime.timedelta(
-                            seconds=total_duration
-                        )
-                    else:
-                        next_irrigation_start = sunrise_time
-
+                    parsed = (
+                        datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                        if isinstance(raw, str)
+                        else raw
+                    )
                 except (ValueError, TypeError) as e:
-                    _LOGGER.warning("Failed to parse sunrise time: %s", e)
+                    _LOGGER.warning("Failed to parse sun %s time: %s", attr, e)
+                    continue
+                if attr == "next_rising":
+                    sunrise_time = parsed
+                else:
+                    next_setting_time = parsed
 
-        # Fallback if sun entity is not available
-        if not sunrise_time or not next_irrigation_start:
+        base_name, offset_seconds = _trigger_start_base_and_offset(
+            selected, total_duration
+        )
+        base_time = next_setting_time if base_name == "sunset" else sunrise_time
+        if base_time is None:
+            # Fall back to whichever sun event is available.
+            base_time = sunrise_time or next_setting_time
+        if base_time is None:
+            # No sun data at all: assume 6 AM tomorrow.
             now = datetime.datetime.now()
-            # Default to 6 AM tomorrow
-            sunrise_time = now.replace(hour=6, minute=0, second=0, microsecond=0)
-            if sunrise_time <= now:
-                sunrise_time += datetime.timedelta(days=1)
-
-            if total_duration > 0:
-                next_irrigation_start = sunrise_time - datetime.timedelta(
-                    seconds=total_duration
-                )
-            else:
-                next_irrigation_start = sunrise_time
+            base_time = now.replace(hour=6, minute=0, second=0, microsecond=0)
+            if base_time <= now:
+                base_time += datetime.timedelta(days=1)
+        if sunrise_time is None:
+            sunrise_time = base_time
+        next_irrigation_start = base_time + datetime.timedelta(seconds=offset_seconds)
 
         # Account for the "days between irrigation" restriction. The start
         # triggers fire every day, but on a skip day the watering decision is
@@ -421,7 +475,6 @@ async def websocket_get_irrigation_info(hass: HomeAssistant, connection, msg):
         # skip days remain. Without this the Info tab claims "tomorrow" even
         # when the schedule will actually wait a few days (#763).
         try:
-            config = await coordinator.store.async_get_config()
             days_between = config.get(
                 const.CONF_DAYS_BETWEEN_IRRIGATION,
                 const.CONF_DEFAULT_DAYS_BETWEEN_IRRIGATION,
