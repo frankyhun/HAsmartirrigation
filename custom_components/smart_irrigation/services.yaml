@@ -8,6 +8,12 @@ calculate_all_zones:
         default: true
         selector:
           boolean: {}
+    dry_run:
+        required: false
+        example: true
+        default: false
+        selector:
+          boolean: {}
 calculate_zone:
   name: Calculate zone
   description: Calculate irrigation requirements for a specific zone.
@@ -19,6 +25,12 @@ calculate_zone:
         required: false
         example: false
         default: true
+        selector:
+          boolean: {}
+    dry_run:
+        required: false
+        example: true
+        default: false
         selector:
           boolean: {}
 update_all_zones:
