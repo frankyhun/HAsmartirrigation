@@ -13,7 +13,14 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import Event, HomeAssistant, State, asyncio, callback
+from homeassistant.core import (
+    Event,
+    HomeAssistant,
+    State,
+    SupportsResponse,
+    asyncio,
+    callback,
+)
 from homeassistant.helpers import (
     config_validation as cv,
 )
@@ -1814,10 +1821,14 @@ class SmartIrrigationCoordinator(
             zone_id: The ID of the zone to update or delete.
             data: The configuration data for the mapping.
 
+        Returns:
+            The calculation result for the calculate branches, None otherwise.
+
         """
         _LOGGER.debug("[async_update_zone_config]: updating zone %s", zone_id)
         if data is None:
             data = {}
+        result = None
         if zone_id is not None:
             zone_id = int(zone_id)
         if const.ATTR_REMOVE in data:
@@ -1833,6 +1844,9 @@ class SmartIrrigationCoordinator(
             _LOGGER.info("Calculating zone %s", zone_id)
             if data is not None:
                 data.pop(const.ATTR_CALCULATE)
+            dry_run = data.get(const.ATTR_DRY_RUN, False)
+            # Forwarded as-is: async_calculate_zone is what enforces that a dry run
+            # does not consume the collected data.
             delete_weather_data = data.get(const.ATTR_DELETE_WEATHER_DATA, True)
 
             # aggregate sensor data
@@ -1841,7 +1855,9 @@ class SmartIrrigationCoordinator(
             mapping_id = zone[const.ZONE_MAPPING]
             mapping = self.store.get_mapping(mapping_id)
             if mapping.get(const.MAPPING_DATA):
-                weatherdata = await self.apply_aggregates_to_mapping_data(mapping)
+                weatherdata = await self.apply_aggregates_to_mapping_data(
+                    mapping, dry_run=dry_run
+                )
             else:
                 _LOGGER.error(
                     "[async_update_zone_config] Error calculating zone %s: no sensor data available",
@@ -1865,14 +1881,23 @@ class SmartIrrigationCoordinator(
                     )
                     return
 
-            await self.async_calculate_zone(
-                zone_id, weatherdata, forecastdata, delete_weather_data
+            result = await self.async_calculate_zone(
+                zone_id, weatherdata, forecastdata, delete_weather_data, dry_run
             )
+            if dry_run:
+                # Nothing was written, so there is no new start event to register
+                # and no valve subscription to refresh.
+                return result
         elif const.ATTR_CALCULATE_ALL in data:
             # calculate all zones
-            _LOGGER.info("Calculating all zones")
+            dry_run = data.get(const.ATTR_DRY_RUN, False)
+            _LOGGER.info("Calculating all zones (dry_run=%s)", dry_run)
             data.pop(const.ATTR_CALCULATE_ALL)
-            await self._async_calculate_all(delete_weather_data=True)
+            result = await self._async_calculate_all(
+                delete_weather_data=True, dry_run=dry_run
+            )
+            if dry_run:
+                return result
 
         elif const.ATTR_UPDATE in data:
             _LOGGER.info("Updating zone %s", zone_id)
@@ -1911,6 +1936,8 @@ class SmartIrrigationCoordinator(
 
         # A zone's linked valve entity may have changed; refresh the observer.
         await self.async_setup_observed_watering()
+
+        return result
 
     async def async_get_all_modules(self):
         """Get all ModuleEntries."""
@@ -1987,13 +2014,19 @@ def register_services(hass: HomeAssistant):
 
     coordinator = hass.data[const.DOMAIN]["coordinator"]
 
+    # These two support an optional response so `dry_run: true` can report what
+    # the calculation would have done without writing anything.
     hass.services.async_register(
         const.DOMAIN,
         const.SERVICE_CALCULATE_ALL_ZONES,
         coordinator.handle_calculate_all_zones,
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
-        const.DOMAIN, const.SERVICE_CALCULATE_ZONE, coordinator.handle_calculate_zone
+        const.DOMAIN,
+        const.SERVICE_CALCULATE_ZONE,
+        coordinator.handle_calculate_zone,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     hass.services.async_register(

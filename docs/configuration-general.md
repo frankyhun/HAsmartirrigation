@@ -69,6 +69,10 @@ Each record holds the complete chain:
 * **Module intermediates**: for PyETO the latitude, elevation, coastal flag, day of year, `et_rad`, `cs_rad`, `sol_rad` (and whether it was provided or estimated from temperature), `net_in_sol_rad`, `avp`, `net_out_lw_rad`, `net_rad` and `eto`, per day, plus the deltas list and its mean. The Passthrough and Static modules record their (fewer) inputs the same way.
 * **Outputs**: ET deficiency, interval multiplier, precipitation, delta, bucket before and after, maximum bucket, drainage rate and drainage, precipitation rate, resulting duration and the volume in m³.
 
+Dry runs (the `dry_run` option of the [calculate services](usage-services.md)) are logged too -
+they are exactly when you ask "why this number?" - but every record carries a `dry_run` flag,
+so a dry run is never mistaken for a real calculation.
+
 The setting is off by default. The file is capped at 2 MB and rotated (one backup kept), so it
 can be left on for a whole season. The most recent records are also included in the
 [diagnostics download](usage-troubleshooting.md) with coordinates rounded and entity ids

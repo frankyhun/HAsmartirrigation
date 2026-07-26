@@ -233,6 +233,22 @@ async def test_no_audit_is_built_when_logging_is_off(tmp_path):
     )
 
 
+async def test_dry_run_records_are_written_but_flagged(tmp_path):
+    """A dry run is logged -- it is when one asks why -- but never looks real."""
+    hass = _Hass(tmp_path)
+    calc_logger = CalculationLogger(hass)
+    coordinator = _Coordinator(hass, _store(), calc_logger)
+    coordinator._pending_calc_record = {"outputs": {}}  # noqa: SLF001
+
+    await coordinator._async_write_calc_record(  # noqa: SLF001
+        {const.ZONE_DURATION: 900, const.ZONE_BUCKET: -3.5}, dry_run=True
+    )
+
+    record = json.loads(Path(calc_logger.path).read_text(encoding="utf-8"))
+    assert record["dry_run"] is True
+    assert record["outputs"]["final"][const.ZONE_DURATION] == 900
+
+
 async def test_record_chains_inputs_intermediates_and_outputs(tmp_path):
     """One record carries the whole chain, and is written on calculation."""
     hass = _Hass(tmp_path)
@@ -276,6 +292,7 @@ async def test_record_chains_inputs_intermediates_and_outputs(tmp_path):
     record = json.loads(lines[0])
 
     assert record["version"] == const.VERSION
+    assert record["dry_run"] is False
     assert record["zone"]["name"] == "Lawn"
     assert record["inputs"]["sensor_group"]["name"] == "Weather station"
     assert record["inputs"]["fields"][const.MAPPING_TEMPERATURE]["count"] == 2

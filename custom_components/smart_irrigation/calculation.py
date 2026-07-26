@@ -64,12 +64,16 @@ class CalculationMixin:
 
         return retval
 
-    async def apply_aggregates_to_mapping_data(self, mapping, continuous_updates=False):
+    async def apply_aggregates_to_mapping_data(
+        self, mapping, continuous_updates=False, dry_run=False
+    ):
         """Apply aggregation functions to mapping data and return the aggregated result.
 
         Args:
             mapping: The mapping dictionary containing sensor data.
             continuous_updates: Whether continuous updates are enabled.
+            dry_run: When True, do not persist the last-calculation marker, so a
+                later real calculation still sees the full collection window.
 
         Returns:
             dict or None: Aggregated mapping data or None if no data is available.
@@ -92,7 +96,9 @@ class CalculationMixin:
         if continuous_updates:
             self._fill_missing_from_last_entry(mapping, data_by_sensor, audit)
 
-        await self._aggregate_sensor_data(data_by_sensor, mapping, resultdata, audit)
+        await self._aggregate_sensor_data(
+            data_by_sensor, mapping, resultdata, audit=audit, dry_run=dry_run
+        )
 
         if audit is not None:
             audit["multiplier"] = hour_multiplier
@@ -243,10 +249,11 @@ class CalculationMixin:
         return hour_multiplier
 
     async def _aggregate_sensor_data(
-        self, data_by_sensor, mapping, resultdata, audit=None
+        self, data_by_sensor, mapping, resultdata, audit=None, dry_run=False
     ):
         """Aggregate sensor data by configured or default aggregate."""
-        last_calc_data = mapping.get(const.MAPPING_DATA_LAST_CALCULATION) or {}
+        # Work on a copy: on a dry run the stored mapping must stay untouched.
+        last_calc_data = dict(mapping.get(const.MAPPING_DATA_LAST_CALCULATION) or {})
         last_calc_data[const.MAPPING_TIMESTAMP] = datetime.now()
 
         for key, d in data_by_sensor.items():
@@ -390,6 +397,14 @@ class CalculationMixin:
                     }
 
         # update LAST_CALCULATION entry
+        if dry_run:
+            # Advancing the marker here would shrink the next real calculation's
+            # hour_multiplier and re-baseline the delta aggregates (double-counting
+            # precipitation), so a dry run must leave it alone.
+            _LOGGER.debug(
+                "[_aggregate_sensor_data] dry run: not updating MAPPING_DATA_LAST_CALCULATION"
+            )
+            return
         await self.store.async_update_mapping(
             mapping.get(const.MAPPING_ID),
             {
@@ -433,8 +448,10 @@ class CalculationMixin:
                 mapping.get(const.MAPPING_ID), changes
             )
 
-    async def _async_calculate_all(self, delete_weather_data):
-        _LOGGER.info("Calculating all automatic zones")
+    async def _async_calculate_all(self, delete_weather_data, dry_run=False):
+        _LOGGER.info(
+            "Calculating all automatic zones%s", " (dry run)" if dry_run else ""
+        )
         # get all zones that are in automatic and for all of those, loop over the unique list of mappings
         # are any modules using OWM / sensors?
 
@@ -477,13 +494,16 @@ class CalculationMixin:
             mapping = self.store.get_mapping(mapping_id)
             if mapping.get(const.MAPPING_DATA):
                 aggregated_mapping_data[mapping_id] = (
-                    await self.apply_aggregates_to_mapping_data(mapping, True)
+                    await self.apply_aggregates_to_mapping_data(
+                        mapping, True, dry_run=dry_run
+                    )
                 )
 
         # TODO: maybe calc each module once here
 
         # loop over zones and calculate
         forecastdata = None
+        results = {}
         for zone in zones:
             # get forecast data if needed (once)
             modinst = await self.getModuleInstanceByID(zone.get(const.ZONE_MODULE))
@@ -511,12 +531,18 @@ class CalculationMixin:
                         zone.get(const.ZONE_NAME),
                     )
                     continue
-                await self.async_calculate_zone(
-                    zone.get(const.ZONE_ID), weatherdata, forecastdata
+                calc_data = await self.async_calculate_zone(
+                    zone.get(const.ZONE_ID),
+                    weatherdata,
+                    forecastdata,
+                    dry_run=dry_run,
                 )
+                if calc_data is not None:
+                    results[zone.get(const.ZONE_ID)] = calc_data
 
-        # remove mapping data from all mappings used
-        if delete_weather_data:
+        # remove mapping data from all mappings used. A dry run must not consume
+        # the collected data, whatever the caller asked for.
+        if delete_weather_data and not dry_run:
             async with asyncio.TaskGroup() as tg:
                 for mapping_id in mapping_ids:
                     changes = {}
@@ -530,18 +556,33 @@ class CalculationMixin:
                             self.store.async_update_mapping(mapping_id, changes)
                         )
 
-        # update start_event
-        _LOGGER.debug("calling register start event from async_calculate_all")
-        await self.register_start_event()
+        # A dry run changed no durations, so there is no new start event to register.
+        if not dry_run:
+            _LOGGER.debug("calling register start event from async_calculate_all")
+            await self.register_start_event()
+        return results
 
     async def async_calculate_zone(
-        self, zone_id, weatherdata, forecastdata=None, delete_weather_data=False
+        self,
+        zone_id,
+        weatherdata,
+        forecastdata=None,
+        delete_weather_data=False,
+        dry_run=False,
     ):
         """Calculate irrigation values for a specific zone.
 
         Args:
             zone_id: The ID of the zone to calculate.
+            weatherdata: Aggregated weather data for the calculation.
+            forecastdata: Forecast data if required by the module.
             delete_weather_data: Whether to delete weather data.
+            dry_run: When True, compute and return the result without writing
+                anything: the bucket, the zone and the collected weather data are
+                all left as they were.
+
+        Returns:
+            dict or None: The calculated zone data.
 
         """
         _LOGGER.debug("async_calculate_zone: Calculating zone %s", zone_id)
@@ -563,8 +604,21 @@ class CalculationMixin:
         calc_data[const.ZONE_LAST_UPDATED] = datetime.now()
 
         # Calculation audit log (#12): written after the seasonal adjustments so
-        # the record shows the values the zone is actually updated with.
-        await self._async_write_calc_record(calc_data)
+        # the record shows the values the zone would be updated with. A dry run
+        # is logged as well -- it is exactly when one asks "why this number?" --
+        # but flagged, so it is never mistaken for a real calculation. The log
+        # is a diagnostic side-file, not integration state, so writing it does
+        # not break the dry-run promise.
+        await self._async_write_calc_record(calc_data, dry_run=dry_run)
+
+        if dry_run:
+            _LOGGER.info(
+                "[async_calculate_zone] dry run for zone %s: bucket would become %s, duration %s (nothing was saved)",
+                zone_id,
+                calc_data.get(const.ZONE_BUCKET),
+                calc_data.get(const.ZONE_DURATION),
+            )
+            return calc_data
 
         # check if data contains delete data true, if so delete the weather data
         if delete_weather_data:
@@ -582,6 +636,7 @@ class CalculationMixin:
             zone.get(const.ZONE_ID),
         )
         async_dispatcher_send(self.hass, const.DOMAIN + "_update_frontend")
+        return calc_data
 
     async def getModuleInstanceByID(self, module_id):
         """Retrieve and instantiate a module by its ID.
@@ -1095,17 +1150,19 @@ class CalculationMixin:
         }
         return record
 
-    async def _async_write_calc_record(self, calc_data) -> None:
+    async def _async_write_calc_record(self, calc_data, dry_run=False) -> None:
         """Write the pending audit record, completed with the stored values."""
         record = getattr(self, "_pending_calc_record", None)
         self._pending_calc_record = None
         if record is None:
             return
+        record["dry_run"] = dry_run
         if calc_data:
-            # After seasonal adjustments: what the zone is actually updated
-            # with, in the user's unit system. Only the keys the calculation
-            # produced -- a multiplier here means a seasonal adjustment changed
-            # it, which is exactly what one looks for in a surprising day.
+            # After seasonal adjustments: what the zone is updated with (would
+            # be, on a dry run), in the user's unit system. Only the keys the
+            # calculation produced -- a multiplier here means a seasonal
+            # adjustment changed it, which is exactly what one looks for on a
+            # surprising day.
             record["outputs"]["final"] = {
                 key: calc_data[key]
                 for key in (
