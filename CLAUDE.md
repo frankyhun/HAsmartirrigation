@@ -32,8 +32,8 @@ Backend Python in `custom_components/smart_irrigation/`, frontend panel (TS/Lit)
 
 - **Everything in English** — public content (commits, PRs, issues, code/comments) *and*
   conversations with the user.
-- **Issues are opened in the fork** (`altmenorg/HAsmartirrigation`), never in the upstream
-  repo (`jeroenterheerdt/HAsmartirrigation`).
+- **Issues are opened in the fork** (`frankyhun/HAsmartirrigation`), never in the upstream
+  repo.
 - **Python**: format with `py -m black custom_components/smart_irrigation/` and lint with
   `py -m ruff check ...` before pushing — the CI checks both.
 - **Frontend**: a change in `frontend/src/` or `frontend/localize/` only takes effect after a
