@@ -1,8 +1,8 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-blue.svg?style=flat-square)](https://github.com/hacs/integration)
 [![release][release-badge]][release-url]
 
-[release-url]: https://github.com/altmenorg/HAsmartirrigation/releases
-[release-badge]: https://img.shields.io/github/v/release/altmenorg/HAsmartirrigation?style=flat-square
+[release-url]: https://github.com/frankyhun/HAsmartirrigation/releases
+[release-badge]: https://img.shields.io/github/v/release/frankyhun/HAsmartirrigation?style=flat-square
 
 # Smart Irrigation
 
