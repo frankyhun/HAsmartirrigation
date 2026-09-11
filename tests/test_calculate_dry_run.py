@@ -52,7 +52,7 @@ async def test_dry_run_does_not_persist_last_calculation():
     agg = _Aggregator()
     mapping = _mapping()
 
-    result = await agg.apply_aggregates_to_mapping_data(mapping, dry_run=True)
+    result = await agg.apply_aggregates_to_mapping_data(mapping, persist=False)
 
     assert result is not None
     agg.store.async_update_mapping.assert_not_called()
@@ -63,7 +63,7 @@ async def test_real_run_persists_last_calculation():
     agg = _Aggregator()
     mapping = _mapping()
 
-    await agg.apply_aggregates_to_mapping_data(mapping, dry_run=False)
+    await agg.apply_aggregates_to_mapping_data(mapping, persist=True)
 
     agg.store.async_update_mapping.assert_called_once()
     _, changes = agg.store.async_update_mapping.call_args[0]
@@ -77,7 +77,7 @@ async def test_dry_run_leaves_stored_last_calculation_untouched():
     mapping = _mapping(last_calculation=stored)
     agg = _Aggregator()
 
-    await agg.apply_aggregates_to_mapping_data(mapping, dry_run=True)
+    await agg.apply_aggregates_to_mapping_data(mapping, persist=False)
 
     # Same object, same content: no in-place timestamp bump, no new sensor keys.
     assert mapping[const.MAPPING_DATA_LAST_CALCULATION] is stored
@@ -88,7 +88,7 @@ async def test_dry_run_still_aggregates_min_and_max_temperature():
     """Skipping the write must not skip the aggregation itself."""
     agg = _Aggregator()
 
-    result = await agg.apply_aggregates_to_mapping_data(_mapping(), dry_run=True)
+    result = await agg.apply_aggregates_to_mapping_data(_mapping(), persist=False)
 
     assert result[const.MAPPING_MAX_TEMP] == 20.0
     assert result[const.MAPPING_MIN_TEMP] == 10.0

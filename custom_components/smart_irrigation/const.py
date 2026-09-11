@@ -1,6 +1,6 @@
 """Store constants."""
 
-VERSION = "v2026.7.1"
+VERSION = "v2026.9.0"
 NAME = "Smart Irrigation"
 MANUFACTURER = "@altmenorg"
 
@@ -140,7 +140,15 @@ CONF_DEFAULT_IU_SHARE_ZONE_DATA = False
 TRIGGER_TYPE_SUNRISE = "sunrise"
 TRIGGER_TYPE_SUNSET = "sunset"
 TRIGGER_TYPE_SOLAR_AZIMUTH = "solar_azimuth"
-TRIGGER_TYPES = [TRIGGER_TYPE_SUNRISE, TRIGGER_TYPE_SUNSET, TRIGGER_TYPE_SOLAR_AZIMUTH]
+# A clock time rather than a solar event, for people who want irrigation to
+# finish (or start) at the same time every day whatever the season.
+TRIGGER_TYPE_TIME = "time"
+TRIGGER_TYPES = [
+    TRIGGER_TYPE_SUNRISE,
+    TRIGGER_TYPE_SUNSET,
+    TRIGGER_TYPE_SOLAR_AZIMUTH,
+    TRIGGER_TYPE_TIME,
+]
 
 # Trigger configuration keys
 TRIGGER_CONF_TYPE = "type"
@@ -149,6 +157,9 @@ TRIGGER_CONF_AZIMUTH_ANGLE = "azimuth_angle"
 TRIGGER_CONF_ENABLED = "enabled"
 TRIGGER_CONF_NAME = "name"
 TRIGGER_CONF_ACCOUNT_FOR_DURATION = "account_for_duration"
+# Clock time "HH:MM" for a time trigger.
+TRIGGER_CONF_AT = "at"
+TRIGGER_CONF_DEFAULT_AT = "06:00"
 
 CONF_WEATHER_SERVICE = "weather_service"
 CONF_WEATHER_SERVICE_API_KEY = "weather_service_api_key"
@@ -319,6 +330,13 @@ ZONE_CURRENT_DRAINAGE = "current_drainage"
 # (litres). Both set when a run credits the bucket (direct or observed).
 ZONE_LAST_IRRIGATION = "last_irrigation"
 ZONE_WATER_USED = "water_used"
+# Rain already accounted for by an asserted bucket value, subtracted at the next
+# calculation so it is not credited twice (#811).
+ZONE_PRECIPITATION_SUPERSEDED = "precipitation_superseded"
+# Depth of soil moisture deficit to let build up before watering, in mm or inch
+# (the management allowed depletion). 0 waters as soon as anything is missing.
+ZONE_IRRIGATION_THRESHOLD = "irrigation_threshold"
+CONF_DEFAULT_IRRIGATION_THRESHOLD = 0.0
 # Optional valve/switch entity observed to credit the bucket (closed-loop).
 ZONE_LINKED_ENTITY = "linked_entity"
 # Optional cumulative volume/flow meter; credits the bucket by measured volume.
@@ -367,6 +385,9 @@ MAPPING_MAX_TEMP = "Maximum Temperature"
 MAPPING_MIN_TEMP = "Minimum Temperature"
 MAPPING_PRECIPITATION = "Precipitation"
 MAPPING_CURRENT_PRECIPITATION = "Current Precipitation"
+# How many samples of the precipitation rate went into an aggregate. Each one
+# reports the last hour, so it also says how many hours were actually observed.
+MAPPING_CURRENT_PRECIPITATION_SAMPLES = "current_precipitation_samples"
 MAPPING_PRESSURE = "Pressure"
 MAPPING_SOLRAD = "Solar Radiation"
 MAPPING_TEMPERATURE = "Temperature"
@@ -439,6 +460,7 @@ UNIT_INHG = "inch Hg"
 UNIT_KMH = "km/h"
 UNIT_MH = "mile/h"
 UNIT_MS = "meter/s"
+UNIT_KNOTS = "knot"
 UNIT_W_M2 = "W/m2"
 UNIT_W_SQFT = "W/sq ft"
 UNIT_MJ_DAY_M2 = "MJ/day/m2"
@@ -470,6 +492,7 @@ W_SQ_FT_TO_W_M2_FACTOR = 10.76391042  # w/sqft * factor = w/m2
 # OTHER FACTORS
 KMH_TO_MS_FACTOR = 0.277777777777778  # kmh * factor = ms
 MS_TO_KMH_FACTOR = 3.6  # m/s * factor = kmh
+KNOTS_TO_MS_FACTOR = 0.5144444444444445  # knot * factor = m/s (1852 m per hour)
 W_TO_MJ_DAY_FACTOR = 0.0864  # w * factor = mj/day, same for w/m2 to mj/day/m2
 K_TO_C_FACTOR = 273.15  # K-factor = C, C+factor=K
 INHG_TO_PSI_FACTOR = 0.49115420057253  # inhg * factor = PSI

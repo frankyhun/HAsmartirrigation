@@ -65,15 +65,17 @@ class CalculationMixin:
         return retval
 
     async def apply_aggregates_to_mapping_data(
-        self, mapping, continuous_updates=False, dry_run=False
+        self, mapping, continuous_updates=False, persist=True
     ):
         """Apply aggregation functions to mapping data and return the aggregated result.
 
         Args:
             mapping: The mapping dictionary containing sensor data.
             continuous_updates: Whether continuous updates are enabled.
-            dry_run: When True, do not persist the last-calculation marker, so a
-                later real calculation still sees the full collection window.
+            persist: Whether to record this as the mapping's last calculation.
+                Pass False to look at the data without consuming it: the last
+                calculation marks where the next interval starts, so moving it
+                would truncate the window the next real calculation works over.
 
         Returns:
             dict or None: Aggregated mapping data or None if no data is available.
@@ -84,7 +86,7 @@ class CalculationMixin:
         if not data:
             return None
 
-        data_by_sensor = self._group_data_by_sensor(data)
+        data_by_sensor, timestamps_by_sensor = self._group_data_by_sensor(data)
         resultdata = {}
         # Calculation audit log (#12): record how the raw sensor records became
         # the aggregate the calculation module is fed. None when the log is off.
@@ -97,7 +99,12 @@ class CalculationMixin:
             self._fill_missing_from_last_entry(mapping, data_by_sensor, audit)
 
         await self._aggregate_sensor_data(
-            data_by_sensor, mapping, resultdata, audit=audit, dry_run=dry_run
+            data_by_sensor,
+            mapping,
+            resultdata,
+            persist=persist,
+            timestamps_by_sensor=timestamps_by_sensor,
+            audit=audit,
         )
 
         if audit is not None:
@@ -166,17 +173,35 @@ class CalculationMixin:
         }
 
     def _group_data_by_sensor(self, data):
-        """Group mapping data by sensor key."""
+        """Group mapping data by sensor key, keeping each value's timestamp.
+
+        A record does not have to carry every key. Continuous updates append one
+        record per sensor state change, so most records carry a single key, and
+        a value can also be missing because its sensor was unavailable. The flat
+        list of record timestamps therefore does not line up with any one key's
+        values, which is why they are paired here instead (#363).
+
+        Returns:
+            tuple: (values per key, timestamp per value per key)
+
+        """
         data_by_sensor = {}
+        timestamps_by_sensor = {}
         for d in data:
-            if isinstance(d, dict):
-                for key, val in d.items():
-                    if val is not None:
-                        data_by_sensor.setdefault(key, []).append(val)
+            if not isinstance(d, dict):
+                continue
+            retrieved_at = d.get(const.RETRIEVED_AT)
+            for key, val in d.items():
+                if val is None:
+                    continue
+                data_by_sensor.setdefault(key, []).append(val)
+                if key != const.RETRIEVED_AT:
+                    timestamps_by_sensor.setdefault(key, []).append(retrieved_at)
         # Drop MAX and MIN temp mapping because we calculate it from temp
-        data_by_sensor.pop(const.MAPPING_MAX_TEMP, None)
-        data_by_sensor.pop(const.MAPPING_MIN_TEMP, None)
-        return data_by_sensor
+        for key in (const.MAPPING_MAX_TEMP, const.MAPPING_MIN_TEMP):
+            data_by_sensor.pop(key, None)
+            timestamps_by_sensor.pop(key, None)
+        return data_by_sensor, timestamps_by_sensor
 
     def _calc_hour_multiplier(self, data_by_sensor, mapping, audit=None):
         """Process retrieved_at timestamps and calculate hour multiplier."""
@@ -248,11 +273,102 @@ class CalculationMixin:
         )
         return hour_multiplier
 
+    def _precipitation_net_of_superseded(self, zone, weatherdata):
+        """Precipitation for the interval, less what an asserted bucket covered.
+
+        Setting the bucket says the soil is in a known state, so the rain that
+        fell before it is already accounted for and must not be added on top of
+        the value asserted (#811).
+        """
+        precip = self._precipitation_for_interval(zone, weatherdata)
+        superseded = zone.get(const.ZONE_PRECIPITATION_SUPERSEDED) or 0.0
+        if superseded <= 0:
+            return precip
+        net = max(0.0, precip - superseded)
+        _LOGGER.debug(
+            "[calculate-module]: %.1f mm of the %.1f mm collected was superseded by an asserted bucket value, using %.1f mm",
+            superseded,
+            precip,
+            net,
+        )
+        return net
+
+    def _precipitation_for_interval(self, zone, weatherdata):
+        """Return the precipitation to add to the bucket, in mm.
+
+        Two different quantities can carry the rain, and only one of them may be
+        counted or it is added twice:
+
+        - ``Precipitation`` is a depth in mm already accumulated over the
+          interval, which is what its aggregate produces.
+        - ``Current Precipitation`` is a rate in mm/h, so it has to be
+          integrated over the interval to become a depth.
+
+        ``Precipitation`` wins when it has a value. Falling back to the rate is
+        what makes a sensor group that only maps a rain-rate sensor count its
+        rain at all: the rate was collected, converted and shown in the panel,
+        but never reached the water balance (#571).
+        """
+        precip = weatherdata.get(const.MAPPING_PRECIPITATION)
+        if precip is not None:
+            _LOGGER.debug("[calculate-module]: precip: %s", precip)
+            return precip
+
+        rate = weatherdata.get(const.MAPPING_CURRENT_PRECIPITATION)
+        if not rate:
+            return 0
+
+        mapping = self.store.get_mapping(zone.get(const.ZONE_MAPPING))
+        aggregate = ((mapping or {}).get(const.MAPPING_MAPPINGS) or {}).get(
+            const.MAPPING_CURRENT_PRECIPITATION
+        )
+        if not isinstance(aggregate, dict):
+            aggregate = {}
+        # A Riemann sum has already integrated the rate over the samples, so it
+        # is a depth; every other aggregate hands back a representative rate.
+        if (
+            aggregate.get(const.MAPPING_CONF_AGGREGATE)
+            == const.MAPPING_CONF_AGGREGATE_RIEMANNSUM
+        ):
+            precip = rate
+        else:
+            interval_hours = weatherdata.get(const.MAPPING_DATA_MULTIPLIER, 0) * 24
+            # The services report the rain of the last hour only, so one sample
+            # accounts for one hour however far apart the samples are. Spreading
+            # the average over the whole interval extrapolates the hours that
+            # were never looked at: at a six-hourly update, 6 mm falling in a
+            # sampled hour came out as 36 mm. Never credit more hours than were
+            # actually observed.
+            observed_hours = weatherdata.get(
+                const.MAPPING_CURRENT_PRECIPITATION_SAMPLES
+            )
+            if observed_hours:
+                interval_hours = min(interval_hours, observed_hours)
+            precip = rate * interval_hours
+        _LOGGER.debug(
+            "[calculate-module]: no precipitation depth, using the rate %s mm/h over the interval: %s",
+            rate,
+            precip,
+        )
+        return precip
+
     async def _aggregate_sensor_data(
-        self, data_by_sensor, mapping, resultdata, audit=None, dry_run=False
+        self,
+        data_by_sensor,
+        mapping,
+        resultdata,
+        persist=True,
+        timestamps_by_sensor=None,
+        audit=None,
     ):
-        """Aggregate sensor data by configured or default aggregate."""
-        # Work on a copy: on a dry run the stored mapping must stay untouched.
+        """Aggregate sensor data by configured or default aggregate.
+
+        ``timestamps_by_sensor`` carries the timestamp of each value, per key,
+        which is what the Riemann sum integrates over. Without it the flat
+        RETRIEVED_AT list is used, which is only right when every record carries
+        every key.
+        """
+        # Work on a copy: when not persisting, the stored mapping must stay untouched.
         last_calc_data = dict(mapping.get(const.MAPPING_DATA_LAST_CALCULATION) or {})
         last_calc_data[const.MAPPING_TIMESTAMP] = datetime.now()
 
@@ -260,6 +376,9 @@ class CalculationMixin:
             if key == const.RETRIEVED_AT:
                 continue
             d = [float(i) for i in d]
+
+            if key == const.MAPPING_CURRENT_PRECIPITATION:
+                resultdata[const.MAPPING_CURRENT_PRECIPITATION_SAMPLES] = len(d)
 
             aggregate = const.MAPPING_CONF_AGGREGATE_OPTIONS_DEFAULT
             if key == const.MAPPING_PRECIPITATION:
@@ -298,7 +417,7 @@ class CalculationMixin:
                     if val < prev:
                         if val == 0:
                             _LOGGER.debug(
-                                "[_aggregate_sensor_data]: detected reset to zero",
+                                "[_aggregate_sensor_data]: detected reset to zero (%s < %s)",
                                 val,
                                 prev,
                             )
@@ -319,7 +438,7 @@ class CalculationMixin:
                 )
                 resultdata[key] = result
 
-            elif len(d) < 2:
+            elif len(d) < 2 and aggregate != const.MAPPING_CONF_AGGREGATE_RIEMANNSUM:
                 if key == const.MAPPING_TEMPERATURE:
                     resultdata[const.MAPPING_MAX_TEMP] = d[0]
                     resultdata[const.MAPPING_MIN_TEMP] = d[0]
@@ -343,40 +462,67 @@ class CalculationMixin:
                 # apply the riemann sum to the data in d
                 # Use the trapezoidal rule for Riemann sum approximation
                 # Assume each value in d is sampled at equal intervals
+                #
+                # dt has to be expressed in the same time unit as the values,
+                # which is per day for everything except the precipitation rate:
+                # convert_mapping_to_metric normalises solar radiation to
+                # MJ/day/m2 (#784) but leaves the precipitation rate in mm/h, so
+                # integrating it in days overstated the result 24-fold.
+                seconds_per_unit = (
+                    3600.0 if key == const.MAPPING_CURRENT_PRECIPITATION else 86400.0
+                )
                 if len(d) < 2:
-                    resultdata[key] = float(d[0])
+                    # A single sample carries no interval of its own, so
+                    # integrate the rate over the calculation interval instead of
+                    # handing back the rate as if it were already a total.
+                    interval_days = resultdata.get(const.MAPPING_DATA_MULTIPLIER, 0)
+                    resultdata[key] = float(d[0]) * (
+                        interval_days * 86400.0 / seconds_per_unit
+                    )
                 else:
-                    # Trapezoidal rule: sum((d[i] + d[i+1]) / 2) * dt
-                    # Values were converted to per-day rates upstream
-                    # (e.g. W/m2 -> MJ/day/m2 in convert_mapping_to_metric),
-                    # so dt must be expressed in days, not seconds (#784).
-                    dt = 1.0
-                    # If we have timestamps, use them to get dt
-                    if const.RETRIEVED_AT in data_by_sensor:
-                        timestamps = data_by_sensor[const.RETRIEVED_AT]
-                        if len(timestamps) == len(d):
-                            try:
-                                # Convert all to datetime
-                                times = []
-                                for t in timestamps:
-                                    if parsed := parse_datetime(t):
-                                        times.append(parsed)
-                                # Calculate average dt in days
-                                if len(times) > 1:
-                                    dts = [
-                                        (times[i + 1] - times[i]).total_seconds()
-                                        / 86400.0
-                                        for i in range(len(times) - 1)
-                                    ]
-                                    dt = statistics.mean(dts)
-                            except (ValueError, TypeError) as err:
-                                _LOGGER.error(
-                                    "[_aggregate_sensor_data]: Failed to parse timestamps for Riemann sum: %s",
-                                    err,
-                                )
-                    # Calculate the sum
+                    # Trapezoidal rule: sum((d[i] + d[i+1]) / 2 * dt[i]), with
+                    # each interval measured from the timestamps of the two
+                    # values it joins rather than from one average spacing, so
+                    # samples that are not evenly spaced integrate correctly.
+                    timestamps = (timestamps_by_sensor or {}).get(key)
+                    if timestamps is None:
+                        # No per-key timestamps: the flat record timestamps are
+                        # only usable when every record carried every key.
+                        timestamps = data_by_sensor.get(const.RETRIEVED_AT)
+                    times = []
+                    if timestamps is not None and len(timestamps) == len(d):
+                        try:
+                            times = [parse_datetime(t) for t in timestamps]
+                        except (ValueError, TypeError) as err:
+                            _LOGGER.error(
+                                "[_aggregate_sensor_data]: Failed to parse timestamps for Riemann sum: %s",
+                                err,
+                            )
+                            times = []
+                    if len(times) != len(d) or any(t is None for t in times):
+                        # Falling back to one day per sample silently inflated
+                        # the result by the number of samples (#363), so say so
+                        # and integrate over the calculation interval instead.
+                        interval_days = resultdata.get(const.MAPPING_DATA_MULTIPLIER, 0)
+                        dt = (
+                            interval_days
+                            * 86400.0
+                            / seconds_per_unit
+                            / max(len(d) - 1, 1)
+                        )
+                        _LOGGER.warning(
+                            "[_aggregate_sensor_data]: no usable timestamps for the Riemann sum of '%s'; "
+                            "spreading its %s samples evenly over the calculation interval",
+                            key,
+                            len(d),
+                        )
+                        times = None
                     riemann_sum = 0.0
                     for i in range(len(d) - 1):
+                        if times is not None:
+                            dt = (
+                                times[i + 1] - times[i]
+                            ).total_seconds() / seconds_per_unit
                         riemann_sum += ((d[i] + d[i + 1]) / 2) * dt
                     resultdata[key] = riemann_sum
             last_calc_data[key] = d[-1]
@@ -399,15 +545,15 @@ class CalculationMixin:
                         "derived_from": const.MAPPING_TEMPERATURE,
                     }
 
-        # update LAST_CALCULATION entry
-        if dry_run:
+        if not persist:
             # Advancing the marker here would shrink the next real calculation's
             # hour_multiplier and re-baseline the delta aggregates (double-counting
             # precipitation), so a dry run must leave it alone.
             _LOGGER.debug(
-                "[_aggregate_sensor_data] dry run: not updating MAPPING_DATA_LAST_CALCULATION"
+                "[_aggregate_sensor_data] not persisting: MAPPING_DATA_LAST_CALCULATION left unchanged"
             )
             return
+        # update LAST_CALCULATION entry
         await self.store.async_update_mapping(
             mapping.get(const.MAPPING_ID),
             {
@@ -451,7 +597,16 @@ class CalculationMixin:
                 mapping.get(const.MAPPING_ID), changes
             )
 
-    async def _async_calculate_all(self, delete_weather_data, dry_run=False):
+    async def _async_calculate_all(self, delete_weather_data=True, dry_run=False):
+        """Calculate every automatic zone.
+
+        ``delete_weather_data`` defaults to True because that is what every
+        caller wants: the weather data collected since the previous calculation
+        has been consumed and must not be counted again. It also doubles as the
+        time argument when this is used directly as an async_track_time_change
+        callback, and the recurring scheduler calls it without any argument at
+        all.
+        """
         _LOGGER.info(
             "Calculating all automatic zones%s", " (dry run)" if dry_run else ""
         )
@@ -498,7 +653,7 @@ class CalculationMixin:
             if mapping.get(const.MAPPING_DATA):
                 aggregated_mapping_data[mapping_id] = (
                     await self.apply_aggregates_to_mapping_data(
-                        mapping, True, dry_run=dry_run
+                        mapping, True, persist=not dry_run
                     )
                 )
 
@@ -605,6 +760,9 @@ class CalculationMixin:
 
         calc_data[const.ZONE_LAST_CALCULATED] = datetime.now()
         calc_data[const.ZONE_LAST_UPDATED] = datetime.now()
+        # The window this calculation just consumed is the one an asserted
+        # bucket value superseded part of, so the marker has done its job (#811).
+        calc_data[const.ZONE_PRECIPITATION_SUPERSEDED] = 0.0
 
         # Calculation audit log (#12): written after the seasonal adjustments so
         # the record shows the values the zone would be updated with. A dry run
@@ -717,8 +875,7 @@ class CalculationMixin:
             delta = modinst.calculate(
                 weather_data=weatherdata, forecast_data=forecastdata
             )
-            precip = weatherdata.get(const.MAPPING_PRECIPITATION, 0)
-            _LOGGER.debug("[calculate-module]: precip: %s", precip)
+            precip = self._precipitation_net_of_superseded(zone, weatherdata)
         elif m[const.MODULE_NAME] == "Static":
             delta = modinst.calculate()
         elif m[const.MODULE_NAME] == "Passthrough":
@@ -729,8 +886,7 @@ class CalculationMixin:
                 # Passthrough bypasses the ET calculation, not the water
                 # balance: measured/forecast precipitation must still refill
                 # the bucket, otherwise it can only ever drain (#790).
-                precip = weatherdata.get(const.MAPPING_PRECIPITATION, 0)
-                _LOGGER.debug("[calculate-module]: precip: %s", precip)
+                precip = self._precipitation_net_of_superseded(zone, weatherdata)
             else:
                 _LOGGER.error(
                     "No evapotranspiration value provided for Passthrough module for zone %s",
@@ -745,8 +901,23 @@ class CalculationMixin:
         # hour_multiplier or on bucket resets, so it is the value to compare when
         # experimenting with configurations (issue #576).
         et_deficiency = delta
+        # The multiplier is the crop factor Kc, so it belongs on the crop's water
+        # use and nowhere else: ETc = ET0 * Kc. It used to be applied at the very
+        # end, to the duration, which scaled the whole water balance and so
+        # scaled the rain along with it, crediting only Kc times the millimetres
+        # that fell. It also left the bucket draining at the full ET0, reaching
+        # any irrigation threshold about 1/Kc times too fast, and no factor
+        # applied afterwards can undo a decision about *when* to water (#779).
+        crop_factor = zone.get(const.ZONE_MULTIPLIER)
+        if crop_factor is None:
+            crop_factor = 1.0
+        delta = delta * crop_factor
         hour_multiplier = weatherdata.get(const.MAPPING_DATA_MULTIPLIER, 1.0)
-        _LOGGER.debug("[calculate-module]: hour_multiplier: %s", hour_multiplier)
+        _LOGGER.debug(
+            "[calculate-module]: crop factor: %s, hour_multiplier: %s",
+            crop_factor,
+            hour_multiplier,
+        )
         delta = delta * hour_multiplier + precip
         data[const.ZONE_DELTA] = delta
         _LOGGER.debug("[calculate-module]: new delta: %s", delta)
@@ -876,7 +1047,16 @@ class CalculationMixin:
         else:
             explanation += f" max(0, [{old_bucket_loc}] + [{delta_loc}] - [{drainage_loc}]) = max(0, {old_bucket:.2f} + {data[const.ZONE_DELTA]:.2f} - {drainage:.2f}) = {newbucket:.2f}.<br/>"
 
-        if newbucket < 0:
+        threshold_mm = self.irrigation_threshold_mm(zone)
+        if newbucket < 0 and abs(newbucket) < threshold_mm:
+            explanation += (
+                await localize(
+                    "module.calculation.explanation.below-irrigation-threshold",
+                    self.hass.config.language,
+                )
+                + f" {abs(newbucket):.2f} / {threshold_mm:.2f}.<br/>"
+            )
+        if newbucket < 0 and abs(newbucket) >= threshold_mm:
             # calculate duration
 
             tput = zone.get(const.ZONE_THROUGHPUT)
@@ -949,21 +1129,13 @@ class CalculationMixin:
                 )
                 + f"] * 3600 = {abs(newbucket):.2f} / {precipitation_rate:.1f} * 3600 = {duration:.0f}.</li>"
             )
-            duration = zone.get(const.ZONE_MULTIPLIER) * duration
             explanation += (
                 "<li>"
                 + await localize(
-                    "module.calculation.explanation.multiplier-is-applied",
+                    "module.calculation.explanation.crop-factor-applied-to-et",
                     self.hass.config.language,
                 )
-                + f" {zone.get(const.ZONE_MULTIPLIER)}, "
-            )
-            explanation += (
-                await localize(
-                    "module.calculation.explanation.duration-after-multiplier-is",
-                    self.hass.config.language,
-                )
-                + f" {round(duration)}.</li>"
+                + f" {crop_factor}.</li>"
             )
 
             # get maximum duration if set and >=0 and override duration if it's higher than maximum duration
@@ -1183,6 +1355,38 @@ class CalculationMixin:
             }
         await self.calc_logger.async_log(record)
 
+    async def precipitation_since_last_calculation(self, zone) -> float:
+        """Rain collected for a zone since its last calculation, in mm.
+
+        Reads the window the next calculation will consume without consuming it,
+        so the same rain is still counted there. Aggregation is the calculation's
+        own, which is what keeps the two answers consistent.
+        """
+        mapping = self.store.get_mapping(zone.get(const.ZONE_MAPPING))
+        if not mapping or not mapping.get(const.MAPPING_DATA):
+            return 0.0
+        weatherdata = await self.apply_aggregates_to_mapping_data(
+            mapping, persist=False
+        )
+        if not weatherdata:
+            return 0.0
+        return float(self._precipitation_for_interval(zone, weatherdata) or 0.0)
+
+    def irrigation_threshold_mm(self, zone) -> float:
+        """The deficit a zone lets build up before watering, in mm.
+
+        Watering the instant anything is missing is a management allowed
+        depletion of zero: right for a lawn, wrong for a tree or a hedge, which
+        wants the soil to dry down and then a deep soak. Both places that turn a
+        bucket into a duration read it from here so they cannot disagree (#815).
+        """
+        threshold = zone.get(const.ZONE_IRRIGATION_THRESHOLD)
+        if not threshold or threshold <= 0:
+            return 0.0
+        if self.hass.config.units is METRIC_SYSTEM:
+            return float(threshold)
+        return float(convert_between(const.UNIT_INCH, const.UNIT_MM, threshold))
+
     def duration_from_bucket(self, zone: dict, bucket_native: float) -> float:
         """Duration (seconds) implied by a zone's current bucket value.
 
@@ -1202,6 +1406,10 @@ class CalculationMixin:
         )
         if bucket_mm >= 0:
             return 0
+        # Below the allowed depletion there is nothing to do yet, so that the
+        # water builds up into one deep run instead of a trickle every day.
+        if abs(bucket_mm) < self.irrigation_threshold_mm(zone):
+            return 0
 
         tput = zone.get(const.ZONE_THROUGHPUT)
         sz = zone.get(const.ZONE_SIZE)
@@ -1212,7 +1420,8 @@ class CalculationMixin:
             sz = convert_between(const.UNIT_SQ_FT, const.UNIT_M2, sz)
         precipitation_rate = (tput * 60) / sz
         duration = abs(bucket_mm) / precipitation_rate * 3600
-        duration = zone.get(const.ZONE_MULTIPLIER) * duration
+        # No crop factor here: it is applied to the evapotranspiration that fills
+        # the bucket, so the bucket handed in already carries it (#779).
 
         maximum_duration = zone.get(const.ZONE_MAXIMUM_DURATION)
         if (

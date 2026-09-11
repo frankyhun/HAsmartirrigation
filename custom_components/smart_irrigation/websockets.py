@@ -263,6 +263,10 @@ class SmartIrrigationZoneView(HomeAssistantView):
                     None, str, datetime.datetime
                 ),
                 vol.Optional(const.ZONE_WATER_USED): vol.Or(float, int, None),
+                vol.Optional(const.ZONE_PRECIPITATION_SUPERSEDED): vol.Or(
+                    float, int, None
+                ),
+                vol.Optional(const.ZONE_IRRIGATION_THRESHOLD): vol.Or(float, int, None),
             }
         )
     )

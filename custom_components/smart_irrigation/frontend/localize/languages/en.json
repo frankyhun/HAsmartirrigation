@@ -69,7 +69,9 @@
         "maximum-bucket-is": "Maximum bucket size is",
         "drainage-rate-is": "Drainage rate when saturated (bucket at max) is",
         "current-drainage-is": "Current drainage is calculated as",
-        "no-drainage": "Current drainage is 0 because"
+        "no-drainage": "Current drainage is 0 because",
+        "crop-factor-applied-to-et": "The multiplier is the crop factor: it was applied to the evapotranspiration rather than to this duration, which therefore already accounts for it. Its value is",
+        "below-irrigation-threshold": "The deficit has not reached this zone's irrigation threshold yet, so no irrigation is necessary and the duration is set to 0. Deficit / threshold:"
       }
     }
   },
@@ -417,7 +419,8 @@
         "linked-entity-hint": "The valve or switch that waters this zone. Whenever it runs (a manual tap, an automation, or Smart Irrigation itself when direct valve control is on), the bucket is credited from the run time and the zone's throughput. Required for the closed-loop features.",
         "flow-sensor": "Cumulative volume meter",
         "flow-sensor-hint": "For exact crediting instead of throughput x time: a cumulative water-meter total (state class total_increasing), not an instant flow rate. The unit is read automatically (L, mL, m³, gal, ft³).",
-        "optional": "optional"
+        "optional": "optional",
+        "irrigation-threshold": "Irrigation threshold"
       },
       "no_items": "There are no zones defined yet.",
       "title": "Zones"
@@ -438,7 +441,8 @@
     "trigger_types": {
       "sunrise": "Sunrise",
       "sunset": "Sunset",
-      "solar_azimuth": "Solar Azimuth"
+      "solar_azimuth": "Solar Azimuth",
+      "time": "Fixed time"
     },
     "fields": {
       "name": {
@@ -464,6 +468,9 @@
       "account_for_duration": {
         "name": "Account for Duration",
         "description": "When enabled, irrigation will start early enough to finish at the specified time. When disabled, irrigation will start exactly at the specified time."
+      },
+      "at": {
+        "name": "Time"
       }
     },
     "dialog": {
@@ -479,7 +486,8 @@
     "confirm_delete": "Are you sure you want to delete the trigger '{name}'?",
     "validation": {
       "name_required": "Trigger name is required",
-      "azimuth_invalid": "Azimuth angle must be a valid number"
+      "azimuth_invalid": "Azimuth angle must be a valid number",
+      "time_invalid": "Please enter a valid time as HH:MM."
     },
     "help": {
       "sunrise_offset": "For sunrise triggers: Use negative values to start before sunrise, positive to start after. Set to 0 to automatically start early enough to complete all zones before sunrise.",
@@ -520,7 +528,8 @@
     "sequencing": {
       "sequential": "Sequential (one zone at a time)",
       "parallel": "Parallel (all zones at once)"
-    }
+    },
+    "sequencing_description": "How your zones are watered. This sets what a start trigger works back from when it has to finish at sunrise: one after another takes the sum of every zone's run time, all at once takes the longest of them. It applies whether Smart Irrigation opens the valves itself or an automation of your own does."
   },
   "calculation_log": {
     "title": "Calculation log",

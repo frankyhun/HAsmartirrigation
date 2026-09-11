@@ -84,6 +84,7 @@ export interface IrrigationStartTrigger {
   enabled: boolean;
   offset_minutes: number;
   azimuth_angle?: number;
+  at?: string;
   account_for_duration: boolean;
 }
 
@@ -91,6 +92,7 @@ export enum TriggerType {
   Sunrise = "sunrise",
   Sunset = "sunset",
   SolarAzimuth = "solar_azimuth",
+  Time = "time",
 }
 
 export enum SmartIrrigationZoneState {
@@ -117,6 +119,7 @@ export class SmartIrrigationZone {
   lead_time: number;
   maximum_duration?: number;
   maximum_bucket?: number;
+  irrigation_threshold?: number;
   last_calculated?: Date;
   last_updated?: Date;
   number_of_data_points?: number;
@@ -149,6 +152,7 @@ export class SmartIrrigationZone {
     this.lead_time = 0;
     this.maximum_duration = 3600; //default maximum duration to one hour = 3600 seconds
     this.maximum_bucket = 50; //default maximum bucket size to 50 mm
+    this.irrigation_threshold = 0; //water as soon as anything is missing
     this.last_calculated = undefined;
     this.drainage_rate = 50.8; //default mm / hour (=2 inch per hour)
     this.current_drainage = 0;

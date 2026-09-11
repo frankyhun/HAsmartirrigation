@@ -75,6 +75,12 @@ from .websockets import async_register_websockets
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _normalize_api_key(value):
+    """Trim a configured API key while preserving keyless services."""
+    return value.strip() if isinstance(value, str) else None
+
+
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(const.DOMAIN)
 
 
@@ -179,7 +185,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 )
             if const.CONF_WEATHER_SERVICE_API_KEY in entry.data:
                 hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_KEY] = (
-                    entry.data.get(const.CONF_WEATHER_SERVICE_API_KEY).strip()
+                    _normalize_api_key(
+                        entry.data.get(const.CONF_WEATHER_SERVICE_API_KEY)
+                    )
                 )
             hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_VERSION] = (
                 entry.data.get(const.CONF_WEATHER_SERVICE_API_VERSION)
@@ -204,12 +212,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             )
         if const.CONF_WEATHER_SERVICE_API_KEY in entry.options:
             hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_KEY] = (
-                entry.options.get(const.CONF_WEATHER_SERVICE_API_KEY)
+                _normalize_api_key(
+                    entry.options.get(const.CONF_WEATHER_SERVICE_API_KEY)
+                )
             )
-            if hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_KEY] is not None:
-                hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_KEY] = hass.data[
-                    const.DOMAIN
-                ][const.CONF_WEATHER_SERVICE_API_KEY].strip()
         if const.CONF_WEATHER_SERVICE_API_VERSION in entry.options:
             hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_VERSION] = (
                 entry.options.get(const.CONF_WEATHER_SERVICE_API_VERSION)
@@ -274,7 +280,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # hass.bus.async_listen(
     #    "core_config_updated", core_config_updated_listener_factory(hass)
     # )
-    hass.bus.async_listen("core_config_updated", handle_core_config_change)
+    # async_listen returns the unsubscribe callback; hand it to the entry so the
+    # listener dies with it. Dropping it left one live listener per reload, each
+    # holding a stale coordinator (#805).
+    entry.async_on_unload(
+        hass.bus.async_listen("core_config_updated", handle_core_config_change)
+    )
     _LOGGER.info(
         "Registered listener for Home Assistant core config changes (unit system)"
     )
@@ -360,7 +371,9 @@ async def options_update_listener(hass: HomeAssistant, config_entry):
                 )
             if const.CONF_WEATHER_SERVICE_API_KEY in config_entry.options:
                 hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_KEY] = (
-                    config_entry.options.get(const.CONF_WEATHER_SERVICE_API_KEY).strip()
+                    _normalize_api_key(
+                        config_entry.options.get(const.CONF_WEATHER_SERVICE_API_KEY)
+                    )
                 )
             hass.data[const.DOMAIN][const.CONF_WEATHER_SERVICE_API_VERSION] = (
                 config_entry.options.get(const.CONF_WEATHER_SERVICE_API_VERSION)
@@ -513,6 +526,7 @@ class SmartIrrigationCoordinator(
         )
         self._track_auto_calc_time_unsub = None
         self._track_auto_update_time_unsub = None
+        self._track_auto_update_delay_unsub = None
         self._track_auto_clear_time_unsub = None
         self._track_sunrise_event_unsub = None
         self._track_irrigation_triggers_unsub = []  # List to track multiple triggers
@@ -727,6 +741,16 @@ class SmartIrrigationCoordinator(
         # Re-evaluate the observed-watering subscription (the feature toggle may
         # have just changed).
         await self.async_setup_observed_watering()
+        # Editing a trigger in the panel only wrote it to the store: the tracker
+        # registered at setup kept the old schedule, so the change took effect
+        # at the next restart (or the next zone edit / calculation, which do
+        # re-register). Re-register when the trigger configuration changed (#800).
+        if (
+            const.CONF_IRRIGATION_START_TRIGGERS in data
+            or const.CONF_ACTIVE_START_TRIGGER in data
+        ):
+            _LOGGER.debug("calling register start event from async_update_config")
+            await self.register_start_event()
         async_dispatcher_send(self.hass, const.DOMAIN + "_config_updated")
 
     async def async_apply_weather_service(self, use, service, api_key):
@@ -801,10 +825,41 @@ class SmartIrrigationCoordinator(
             self.weather_service,
         )
 
+    def _warn_if_update_interval_undersamples_rain(self, data):
+        """Warn when the update schedule cannot see all the rain.
+
+        The weather services report precipitation as the amount over the last
+        hour (Open-Meteo, OpenWeatherMap) or as an instantaneous rate (Pirate
+        Weather). Collecting that once every few hours leaves the hours in
+        between unobserved, so rain that fell in them is missed and rain that
+        fell in a sampled hour is stretched over the whole gap. Hourly or more
+        frequent collection is what the water balance expects.
+        """
+        if not self.use_weather_service or not data.get(const.CONF_AUTO_UPDATE_ENABLED):
+            return
+        schedule = data.get(const.CONF_AUTO_UPDATE_SCHEDULE)
+        try:
+            interval = int(data.get(const.CONF_AUTO_UPDATE_INTERVAL, 1))
+        except (TypeError, ValueError):
+            return
+        too_slow = (schedule == const.CONF_AUTO_UPDATE_HOURLY and interval > 1) or (
+            schedule == const.CONF_AUTO_UPDATE_DAILY
+        )
+        if too_slow:
+            _LOGGER.warning(
+                "Weather data is collected every %s %s. Precipitation is reported by the "
+                "weather service for the last hour only, so rain falling between two "
+                "collections is not counted. Set the automatic update interval to 1 hour "
+                "(or shorter) for the water balance to see all of it",
+                interval,
+                schedule,
+            )
+
     async def set_up_auto_update_time(self, data):  # noqa: D102
         # WIP v2024.6.X:
         # experiment to use subscriptions to catch all updates instead of just on a time schedule
         await self.update_subscriptions(data)
+        self._warn_if_update_interval_undersamples_rain(data)
         if data[const.CONF_AUTO_UPDATE_ENABLED]:
             # CONF_AUTO_UPDATE_SCHEDULE: minute, hour, day
             # CONF_AUTO_UPDATE_INTERVAL: X
@@ -835,7 +890,12 @@ class SmartIrrigationCoordinator(
                 if int(data[const.CONF_AUTO_UPDATE_DELAY]) > 0:
                     delay = int(data[const.CONF_AUTO_UPDATE_DELAY])
                     _LOGGER.info("Delaying auto update with %s seconds", delay)
-            async_call_later(
+            # Keep the cancel callback: without it a pending delay survived an
+            # unload/reload and started an interval tracker on the dead
+            # coordinator (#805). Rescheduling also replaces the previous one.
+            if self._track_auto_update_delay_unsub:
+                self._track_auto_update_delay_unsub()
+            self._track_auto_update_delay_unsub = async_call_later(
                 self.hass, timedelta(seconds=delay), self.track_update_time
             )
         elif self._track_auto_update_time_unsub:
@@ -1315,6 +1375,8 @@ class SmartIrrigationCoordinator(
 
     async def track_update_time(self, *args):
         """Track and schedule periodic updates for Smart Irrigation based on configuration."""
+        # The delayed call that got us here has run; drop its stale handle.
+        self._track_auto_update_delay_unsub = None
         # Do an immediate update only when Home Assistant is already running
         # (e.g. the user just changed a setting). Skip it during start-up, when
         # source sensors may not have a value yet and would poison the data.
@@ -1814,6 +1876,46 @@ class SmartIrrigationCoordinator(
                     static_values[key] = val
         return static_values
 
+    async def _supersede_precipitation_on_bucket_set(self, zone_id, data):
+        """Record the rain an asserted bucket value has already accounted for.
+
+        Setting the bucket says the soil is in a known state right now, which is
+        what ``reset_bucket`` asserts at the end of the documented irrigation
+        automation. The rain collected since the last calculation happened
+        before that assertion, so it is part of what the assertion is about, but
+        the calculation window spans the moment of the reset and would credit it
+        to the bucket afterwards, on top of the value just asserted (#811).
+
+        Nothing is needed on the closed-loop path: observed watering credits the
+        bucket by the water applied rather than asserting a value, and the
+        running balance already comes out right there.
+        """
+        if const.ATTR_NEW_BUCKET_VALUE not in data:
+            return data
+        zone = self.store.get_zone(zone_id)
+        if not zone:
+            return data
+        try:
+            superseded = await self.precipitation_since_last_calculation(zone)
+        except Exception as e:
+            # Losing the marker costs accuracy at the next calculation; failing
+            # the bucket reset would leave an automation half done.
+            _LOGGER.error(
+                "Could not work out the rain superseded by the new bucket value "
+                "on zone %s: %s",
+                zone.get(const.ZONE_NAME),
+                e,
+            )
+            return data
+        if superseded <= 0:
+            return data
+        _LOGGER.debug(
+            "[set_bucket] zone %s: %.1f mm of rain is superseded by the asserted bucket value",
+            zone.get(const.ZONE_NAME),
+            superseded,
+        )
+        return {**data, const.ZONE_PRECIPITATION_SUPERSEDED: superseded}
+
     async def async_update_zone_config(
         self, zone_id: int | None = None, data: dict | None = None
     ):
@@ -1858,7 +1960,7 @@ class SmartIrrigationCoordinator(
             mapping = self.store.get_mapping(mapping_id)
             if mapping.get(const.MAPPING_DATA):
                 weatherdata = await self.apply_aggregates_to_mapping_data(
-                    mapping, dry_run=dry_run
+                    mapping, persist=not dry_run
                 )
             else:
                 _LOGGER.error(
@@ -1919,6 +2021,7 @@ class SmartIrrigationCoordinator(
             await self.handle_clear_weatherdata(None)
         elif zone_id is not None and self.store.get_zone(zone_id):
             # modify a zone
+            data = await self._supersede_precipitation_on_bucket_set(zone_id, data)
             entry = await self.store.async_update_zone(zone_id, data)
             async_dispatcher_send(self.hass, const.DOMAIN + "_config_updated", zone_id)
             await self.update_subscriptions()
@@ -2006,15 +2109,22 @@ class SmartIrrigationCoordinator(
             "_track_midnight_time_unsub",
             "_track_auto_calc_time_unsub",
             "_track_auto_update_time_unsub",
+            "_track_auto_update_delay_unsub",
             "_track_auto_clear_time_unsub",
             "_track_sunrise_event_unsub",
         ):
-            if unsub := getattr(self, attr):
+            if unsub := getattr(self, attr, None):
                 unsub()
                 setattr(self, attr, None)
         for unsub in self._track_irrigation_triggers_unsub:
             unsub()
         self._track_irrigation_triggers_unsub.clear()
+
+        # cancel pending debounced sensor updates: they hold this coordinator
+        # and would fire against it after the reload (#805).
+        while self._debounced_update_cancel:
+            _, cancel = self._debounced_update_cancel.popitem()
+            cancel()
 
         # stop watching linked valves (closed-loop bucket)
         self.async_teardown_observed_watering()

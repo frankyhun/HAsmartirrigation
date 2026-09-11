@@ -14,14 +14,22 @@ from functools import partial
 
 from homeassistant.const import CONF_LONGITUDE
 from homeassistant.core import callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_track_point_in_utc_time,
     async_track_sunrise,
     async_track_sunset,
+    async_track_time_change,
 )
+from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from . import const
-from .helpers import find_next_solar_azimuth_time, normalize_azimuth_angle
+from .helpers import (
+    check_time,
+    convert_between,
+    find_next_solar_azimuth_time,
+    normalize_azimuth_angle,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,7 +90,14 @@ class TriggersMixin:
             await self._register_legacy_sunrise_trigger()
             return
 
-        if total_duration <= 0:
+        # A trigger that accounts for the duration has to know it to work out
+        # when to start, so there is nothing to schedule without one. A trigger
+        # that fires at a fixed offset does not need it and stays scheduled, so
+        # its event is still fired (and shown as the next start) on a day when
+        # no zone happens to need water.
+        if total_duration <= 0 and selected.get(
+            const.TRIGGER_CONF_ACCOUNT_FOR_DURATION, True
+        ):
             _LOGGER.info(
                 "No enabled zones with duration > 0, skipping trigger registration"
             )
@@ -128,6 +143,16 @@ class TriggersMixin:
                     account_for_duration,
                     trigger_info,
                 )
+            elif trigger_type == const.TRIGGER_TYPE_TIME:
+                at = trigger.get(const.TRIGGER_CONF_AT, const.TRIGGER_CONF_DEFAULT_AT)
+                trigger_info[const.TRIGGER_CONF_AT] = at
+                await self._register_time_trigger(
+                    at,
+                    trigger_name,
+                    total_duration,
+                    account_for_duration,
+                    trigger_info,
+                )
             elif trigger_type == const.TRIGGER_TYPE_SOLAR_AZIMUTH:
                 azimuth_angle = trigger.get(const.TRIGGER_CONF_AZIMUTH_ANGLE, 0)
                 # Normalize azimuth angle to 0-360 range
@@ -145,6 +170,52 @@ class TriggersMixin:
                 _LOGGER.warning("Unknown trigger type: %s", trigger_type)
         except Exception as e:
             _LOGGER.error("Failed to register trigger '%s': %s", trigger_name, e)
+
+    async def _register_time_trigger(
+        self,
+        at: str,
+        trigger_name: str,
+        total_duration: int,
+        account_for_duration: bool,
+        trigger_info: dict,
+    ):
+        """Register a trigger on a clock time.
+
+        With ``account_for_duration`` the run is worked back from ``at`` so it
+        finishes then, which is what people asking for this want: irrigation done
+        by a fixed hour whatever the season. Without it, it starts at ``at``.
+
+        Unlike the azimuth trigger this uses a repeating time tracker rather than
+        a one-shot point in time, so it survives a day on which nothing
+        re-registers it.
+        """
+        if not check_time(at):
+            _LOGGER.warning(
+                "Start trigger '%s' has an invalid time: %s", trigger_name, at
+            )
+            return
+        hours, minutes = (int(part) for part in at.split(":")[:2])
+        fire_at = datetime.now().replace(
+            hour=hours, minute=minutes, second=0, microsecond=0
+        )
+        if account_for_duration:
+            fire_at -= timedelta(seconds=total_duration)
+
+        unsub = async_track_time_change(
+            self.hass,
+            partial(self._fire_start_event, trigger_info),
+            hour=fire_at.hour,
+            minute=fire_at.minute,
+            second=0,
+        )
+        self._track_irrigation_triggers_unsub.append(unsub)
+        _LOGGER.info(
+            "Registered time trigger '%s': will fire at %02d:%02d%s",
+            trigger_name,
+            fire_at.hour,
+            fire_at.minute,
+            f" so the run finishes at {at}" if account_for_duration else "",
+        )
 
     async def _register_legacy_sunrise_trigger(self):
         """Register the legacy sunrise trigger for backward compatibility."""
@@ -365,8 +436,11 @@ class TriggersMixin:
                             "will not fire",
                             skip_reason,
                         )
-                        # Count this as a (skipped) day, once.
-                        await self._increment_days_since_irrigation()
+                        # Do NOT increment days-since-irrigation here: the
+                        # midnight reset already counts every calendar day
+                        # exactly once, skipped days included. Counting again
+                        # here advanced the counter by 2 per skipped day, so a
+                        # days-between setting of 5 watered every 3 days (#802).
 
                 if not self._watering_decision_today:
                     _LOGGER.info(
@@ -375,6 +449,9 @@ class TriggersMixin:
                         name,
                     )
                     return
+
+                # Rain between the calculation and now shortens the run.
+                await self._apply_rain_since_calculation()
 
                 # Fire the event with the trigger's identity.
                 self.hass.bus.fire(event_to_fire, event_data)
@@ -403,15 +480,93 @@ class TriggersMixin:
                         {const.START_EVENT_FIRED_TODAY: True}
                     )
             except Exception as e:
+                # Fail safe, not fail open (#804): if we cannot tell whether
+                # today is a watering day, not watering is recoverable (one
+                # missed day, visible in the log) while watering on an
+                # unevaluated decision is not. Firing here also risked a double
+                # fire when the exception came from the post-fire bookkeeping.
                 _LOGGER.error(
-                    "Error evaluating irrigation conditions for trigger '%s', "
-                    "firing event anyway: %s",
+                    "Error evaluating irrigation conditions for trigger '%s'; "
+                    "not firing the start event (fail-safe): %s",
                     name,
                     e,
                 )
-                self.hass.bus.fire(event_to_fire, event_data)
 
         self.hass.async_create_task(check_and_fire())
+
+    async def _apply_rain_since_calculation(self):
+        """Shorten each zone's run by the rain that fell since it was calculated.
+
+        The duration is worked out at calculation time, hours before irrigation
+        starts, and rain in between was ignored: a bucket of -12 mm followed by
+        8 mm of rain overnight still watered 12 mm (#810).
+
+        The bucket itself is deliberately left alone. It is a running balance:
+        irrigation credits it by the water actually applied, and the next
+        calculation adds the whole interval's rain, so crediting the rain here as
+        well would count it twice. Shortening only this run keeps the balance
+        exact, since the smaller amount applied is what gets credited.
+
+        A zone whose sensor group saw no rain is not touched at all, so a dry
+        night leaves the calculated duration exactly as it was.
+        """
+        try:
+            zones = await self.store.async_get_zones()
+        except Exception as e:  # pragma: no cover - defensive
+            _LOGGER.error("Could not read the zones to account for rain: %s", e)
+            return
+
+        ha_config_is_metric = self.hass.config.units is METRIC_SYSTEM
+        for zone in zones:
+            if zone.get(const.ZONE_STATE) != const.ZONE_STATE_AUTOMATIC:
+                # A manual zone carries a duration its owner set, not one
+                # derived from the bucket.
+                continue
+            if not zone.get(const.ZONE_DURATION):
+                continue
+            try:
+                rain_mm = await self.precipitation_since_last_calculation(zone)
+                # Rain an asserted bucket value already accounted for is not
+                # available to shorten the run either (#811).
+                rain_mm -= zone.get(const.ZONE_PRECIPITATION_SUPERSEDED) or 0.0
+                if rain_mm <= 0:
+                    continue
+                rain_native = (
+                    rain_mm
+                    if ha_config_is_metric
+                    else convert_between(const.UNIT_MM, const.UNIT_INCH, rain_mm)
+                )
+                bucket = (zone.get(const.ZONE_BUCKET) or 0.0) + rain_native
+                duration = self.duration_from_bucket(zone, bucket)
+                # Rain can only ever shorten a run. Anything else would mean the
+                # two ways of deriving a duration from a bucket have drifted
+                # apart, and lengthening a run over rain is not a thing to do on
+                # the strength of that.
+                if duration >= zone.get(const.ZONE_DURATION):
+                    continue
+                _LOGGER.info(
+                    "Zone %s: %.1f mm of rain since the calculation, watering for %s s instead of %s s",
+                    zone.get(const.ZONE_NAME),
+                    rain_mm,
+                    duration,
+                    zone.get(const.ZONE_DURATION),
+                )
+                await self.store.async_update_zone(
+                    zone.get(const.ZONE_ID), {const.ZONE_DURATION: duration}
+                )
+                async_dispatcher_send(
+                    self.hass,
+                    const.DOMAIN + "_config_updated",
+                    zone.get(const.ZONE_ID),
+                )
+            except Exception as e:
+                # Watering the calculated amount is the previous behaviour, so a
+                # failure here costs accuracy, not the run.
+                _LOGGER.error(
+                    "Could not account for rain since the calculation on zone %s: %s",
+                    zone.get(const.ZONE_NAME),
+                    e,
+                )
 
     @callback
     def _reset_event_fired_today(self, *args):

@@ -45,6 +45,7 @@ from .const import (
     CONF_DEFAULT_DIRECT_VALVE_CONTROL_ENABLED,
     CONF_DEFAULT_DRAINAGE_RATE,
     CONF_DEFAULT_IRRIGATION_START_TRIGGERS,
+    CONF_DEFAULT_IRRIGATION_THRESHOLD,
     CONF_DEFAULT_MAXIMUM_BUCKET,
     CONF_DEFAULT_MAXIMUM_DURATION,
     CONF_DEFAULT_OBSERVED_WATERING_ENABLED,
@@ -127,6 +128,7 @@ from .const import (
     ZONE_ET_DEFICIENCY,
     ZONE_FLOW_SENSOR,
     ZONE_ID,
+    ZONE_IRRIGATION_THRESHOLD,
     ZONE_LAST_IRRIGATION,
     ZONE_LAST_UPDATED,
     ZONE_LEAD_TIME,
@@ -138,6 +140,7 @@ from .const import (
     ZONE_MULTIPLIER,
     ZONE_NAME,
     ZONE_NUMBER_OF_DATA_POINTS,
+    ZONE_PRECIPITATION_SUPERSEDED,
     ZONE_SIZE,
     ZONE_STATE,
     ZONE_STATE_AUTOMATIC,
@@ -207,6 +210,16 @@ class ZoneEntry:
     water_used = attr.ib(type=float, default=0.0)
     # Optional valve/switch entity watched to credit the bucket (closed-loop).
     linked_entity = attr.ib(type=str, default=None)
+    # How much of a deficit to let build up before watering, in the user's depth
+    # unit. 0 keeps watering as soon as anything is missing (#815).
+    irrigation_threshold = attr.ib(
+        type=float, default=CONF_DEFAULT_IRRIGATION_THRESHOLD
+    )
+    # Rain already accounted for by an asserted bucket value. Setting the bucket
+    # says the soil is in a known state, which supersedes the rain collected
+    # since the last calculation; without this it lands in the bucket again at
+    # the next one (#811).
+    precipitation_superseded = attr.ib(type=float, default=0.0)
     # Optional cumulative volume meter; credits the bucket by measured volume.
     flow_sensor = attr.ib(type=str, default=None)
 
@@ -220,6 +233,105 @@ class ModuleEntry:
     description = attr.ib(type=str, default=None)
     config = attr.ib(type=str, default=None)
     schema = attr.ib(type=str, default=None)
+
+
+def default_mapping_entry(mapping_key: str, use_weather_service: bool) -> dict:
+    """Return the default source configuration for a single sensor group field.
+
+    Evapotranspiration and solar radiation are never delivered by the configured
+    weather service directly. Neither is the precipitation depth: a weather
+    service supplies a rate, which reaches the water balance through Current
+    Precipitation (#764), and the depth is for a rain gauge of one's own. Those
+    three default to "none" when a weather service is in use and to a sensor
+    otherwise. Every other field defaults to the weather service when there is
+    one.
+    """
+    if mapping_key in (
+        MAPPING_EVAPOTRANSPIRATION,
+        MAPPING_SOLRAD,
+        MAPPING_PRECIPITATION,
+    ):
+        source = (
+            MAPPING_CONF_SOURCE_NONE
+            if use_weather_service
+            else MAPPING_CONF_SOURCE_SENSOR
+        )
+    elif use_weather_service:
+        source = MAPPING_CONF_SOURCE_WEATHER_SERVICE
+    else:
+        source = MAPPING_CONF_SOURCE_SENSOR
+    return {
+        MAPPING_CONF_SOURCE: source,
+        MAPPING_CONF_SENSOR: "",
+        MAPPING_CONF_UNIT: "",
+    }
+
+
+def move_service_precipitation_to_the_rate(the_map: dict) -> dict:
+    """Move a weather-service precipitation mapping onto the rate field.
+
+    A weather service does not supply a precipitation depth worth using. It
+    supplies the rain of the last hour, a rate, which reaches the water balance
+    through ``Current Precipitation`` and is integrated over the calculation
+    interval (#764). Its daily figure is a forecast for the part of the day that
+    has not happened yet.
+
+    A group that asked the service for its rain has to keep getting it, from the
+    field that now carries it, or it would silently lose precipitation
+    altogether. Groups older than the rate field carry an empty slot for it,
+    backfilled by the loader with no source at all, which is exactly that case.
+
+    The depth slot is then pointed at "none", because the panel no longer offers
+    the weather service there and a source that does nothing is how a sensor
+    group comes to look configured while it is not (#809). A rate sensor
+    somebody configured is left alone, and so is a depth coming from a rain
+    gauge, which still takes precedence over the service.
+    """
+    if not isinstance(the_map, dict):
+        return the_map
+    depth = the_map.get(MAPPING_PRECIPITATION)
+    if (
+        not isinstance(depth, dict)
+        or depth.get(MAPPING_CONF_SOURCE) != MAPPING_CONF_SOURCE_WEATHER_SERVICE
+    ):
+        return the_map
+
+    rate = the_map.get(MAPPING_CURRENT_PRECIPITATION)
+    rate_is_unset = not isinstance(rate, dict) or rate.get(MAPPING_CONF_SOURCE) in (
+        None,
+        "",
+        MAPPING_CONF_SOURCE_NONE,
+    )
+    if rate_is_unset:
+        the_map[MAPPING_CURRENT_PRECIPITATION] = {
+            MAPPING_CONF_SOURCE: MAPPING_CONF_SOURCE_WEATHER_SERVICE,
+            MAPPING_CONF_SENSOR: "",
+            MAPPING_CONF_UNIT: "",
+        }
+    the_map[MAPPING_PRECIPITATION] = {
+        **depth,
+        MAPPING_CONF_SOURCE: MAPPING_CONF_SOURCE_NONE,
+    }
+    return the_map
+
+
+def normalize_mapping_conf(the_map: dict, use_weather_service: bool) -> dict:
+    """Replace sourceless sensor group fields by their default configuration.
+
+    Sensor groups created from the panel used to store a plain empty string for
+    every field. The panel renders the source dropdown with "weather service" as
+    its first option, so such a group looks fully configured while the backend
+    sees no source at all and never fetches anything for it. Turn those entries
+    into the configuration the panel was showing all along.
+    """
+    if not isinstance(the_map, dict):
+        return the_map
+    for mapping_key, value in the_map.items():
+        if not isinstance(value, dict):
+            the_map[mapping_key] = default_mapping_entry(
+                mapping_key, use_weather_service
+            )
+    return the_map
 
 
 @attr.s(slots=True, frozen=True)
@@ -610,6 +722,12 @@ class SmartIrrigationStorage:
                         current_drainage=zone.get(ZONE_CURRENT_DRAINAGE, None),
                         last_irrigation=zone.get(ZONE_LAST_IRRIGATION, None),
                         water_used=zone.get(ZONE_WATER_USED, 0.0),
+                        precipitation_superseded=zone.get(
+                            ZONE_PRECIPITATION_SUPERSEDED, 0.0
+                        ),
+                        irrigation_threshold=zone.get(
+                            ZONE_IRRIGATION_THRESHOLD, CONF_DEFAULT_IRRIGATION_THRESHOLD
+                        ),
                         linked_entity=zone.get(ZONE_LINKED_ENTITY, None),
                         flow_sensor=zone.get(ZONE_FLOW_SENSOR, None),
                     )
@@ -646,6 +764,11 @@ class SmartIrrigationStorage:
                         the_map.pop(MAPPING_MIN_TEMP)
                     if MAPPING_CURRENT_PRECIPITATION not in the_map:
                         the_map[MAPPING_CURRENT_PRECIPITATION] = {}
+                    # repair sensor groups saved without any source at all
+                    the_map = normalize_mapping_conf(
+                        the_map, config.use_weather_service
+                    )
+                    the_map = move_service_precipitation_to_the_rate(the_map)
                     mappings[mapping[MAPPING_ID]] = MappingEntry(
                         id=mapping[MAPPING_ID],
                         name=mapping[MAPPING_NAME],
@@ -743,13 +866,6 @@ class SmartIrrigationStorage:
 
     async def async_factory_default_mappings(self):
         """Set up factory default mappings if none exist."""
-        # this should be Weather Service mapping if a weather service is defined
-        mapping_source = ""
-        if self.config.use_weather_service:
-            # we're using a weather service
-            mapping_source = MAPPING_CONF_SOURCE_WEATHER_SERVICE
-        else:
-            mapping_source = MAPPING_CONF_SOURCE_SENSOR
         mappings = [
             MAPPING_DEWPOINT,
             MAPPING_EVAPOTRANSPIRATION,
@@ -761,20 +877,12 @@ class SmartIrrigationStorage:
             MAPPING_TEMPERATURE,
             MAPPING_WINDSPEED,
         ]
-        conf = {}
-        for mapping_key in mappings:
-            map_source = mapping_source
-            # evapotranspiration and solrad can only come from a sensor or none
-            if mapping_key in [MAPPING_EVAPOTRANSPIRATION, MAPPING_SOLRAD]:
-                if self.config.use_weather_service:
-                    map_source = MAPPING_CONF_SOURCE_NONE
-                else:
-                    map_source = MAPPING_CONF_SOURCE_SENSOR
-            conf[mapping_key] = {
-                MAPPING_CONF_SOURCE: map_source,
-                MAPPING_CONF_SENSOR: "",
-                MAPPING_CONF_UNIT: "",
-            }
+        conf = {
+            mapping_key: default_mapping_entry(
+                mapping_key, self.config.use_weather_service
+            )
+            for mapping_key in mappings
+        }
         new_mapping1 = MappingEntry(
             **{
                 MAPPING_ID: 0,
@@ -1008,6 +1116,13 @@ class SmartIrrigationStorage:
 
     async def async_create_mapping(self, data: dict) -> MappingEntry:
         """Create a new MappingEntry."""
+        if isinstance(data.get(MAPPING_MAPPINGS), dict):
+            data = {
+                **data,
+                MAPPING_MAPPINGS: normalize_mapping_conf(
+                    dict(data[MAPPING_MAPPINGS]), self.config.use_weather_service
+                ),
+            }
         new_mapping = MappingEntry(**data)
         if not new_mapping.id:
             mappings = await self.async_get_mappings()
@@ -1033,6 +1148,10 @@ class SmartIrrigationStorage:
         old = self.mappings[mapping_id]
         # make sure we don't override the ID
         changes.pop("id", None)
+        if isinstance(changes.get(MAPPING_MAPPINGS), dict):
+            changes[MAPPING_MAPPINGS] = normalize_mapping_conf(
+                dict(changes[MAPPING_MAPPINGS]), self.config.use_weather_service
+            )
         if old is not None:
             if old.data_last_entry is not None and len(old.data_last_entry) > 0:
                 if MAPPING_DATA_LAST_ENTRY not in changes:

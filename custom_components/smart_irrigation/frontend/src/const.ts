@@ -1,4 +1,4 @@
-export const VERSION = "v2026.7.1";
+export const VERSION = "v2026.9.0";
 export const REPO = "https://github.com/altmenorg/HAsmartirrigation";
 export const ISSUES_URL = REPO + "/issues";
 
@@ -48,6 +48,7 @@ export const START_TRIGGER_DEFAULT = "default";
 export const TRIGGER_TYPE_SUNRISE = "sunrise";
 export const TRIGGER_TYPE_SUNSET = "sunset";
 export const TRIGGER_TYPE_SOLAR_AZIMUTH = "solar_azimuth";
+export const TRIGGER_TYPE_TIME = "time";
 export const TRIGGER_CONF_TYPE = "type";
 export const TRIGGER_CONF_OFFSET_MINUTES = "offset_minutes";
 export const TRIGGER_CONF_AZIMUTH_ANGLE = "azimuth_angle";
@@ -123,6 +124,9 @@ export const UNIT_DEGREES_F = "°F";
 export const UNIT_MM = "mm";
 export const UNIT_INCH = "in";
 export const UNIT_PERCENT = "%";
+// The stored value is "millibar"; the backend knows it under both that name
+// and "mbar" (they are the same unit), so do not "fix" this string: existing
+// sensor groups have it saved.
 export const UNIT_MBAR = "millibar";
 export const UNIT_HPA = "hPa";
 export const UNIT_PSI = "psi";
@@ -130,6 +134,7 @@ export const UNIT_INHG = "inch Hg";
 export const UNIT_KMH = "km/h";
 export const UNIT_MH = "mile/h";
 export const UNIT_MS = "meter/s";
+export const UNIT_KNOTS = "knot";
 export const UNIT_W_M2 = "W/m2";
 export const UNIT_W_SQFT = "W/sq ft";
 export const UNIT_MJ_DAY_M2 = "MJ/day/m2";
@@ -158,6 +163,7 @@ export const ZONE_MAPPING = "mapping";
 export const ZONE_LEAD_TIME = "lead_time";
 export const ZONE_MAXIMUM_DURATION = "maximum_duration";
 export const ZONE_MAXIMUM_BUCKET = "maximum_bucket";
+export const ZONE_IRRIGATION_THRESHOLD = "irrigation_threshold";
 export const ZONE_DRAINAGE_RATE = "drainage_rate";
 export const ZONE_CURRENT_DRAINAGE = "current_drainage";
 export const ZONE_LINKED_ENTITY = "linked_entity";
