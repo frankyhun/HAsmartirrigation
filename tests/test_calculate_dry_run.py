@@ -243,8 +243,27 @@ async def test_dry_run_zone_calculation_skips_the_start_event():
     # dry_run must reach async_calculate_zone, which is the single place that
     # enforces a dry run does not consume the collected data (covered by
     # test_dry_run_zone_writes_nothing).
-    args = coord.async_calculate_zone.call_args[0]
-    assert args[4] is True, "dry_run must reach async_calculate_zone"
+    # By keyword: the fifth positional parameter is ``prune``, so passing it
+    # positionally left dry_run False and the "dry" run wrote the zone.
+    kwargs = coord.async_calculate_zone.call_args[1]
+    assert kwargs["dry_run"] is True, "dry_run must reach async_calculate_zone"
+
+
+async def test_zone_with_an_empty_window_is_not_calculated():
+    """A buffer holding only readings the zone already consumed yields no data.
+
+    Regression test: the aggregate came back None and was handed to the module
+    anyway, which raised and failed the HTTP request from the panel.
+    """
+    coord = _coordinator()
+    coord.apply_aggregates_to_mapping_data = AsyncMock(return_value=None)
+
+    result = await coord.async_update_zone_config(
+        1, data={const.ATTR_CALCULATE: const.ATTR_CALCULATE}
+    )
+
+    assert result is None
+    coord.async_calculate_zone.assert_not_awaited()
 
 
 async def test_calculate_all_honours_dry_run():

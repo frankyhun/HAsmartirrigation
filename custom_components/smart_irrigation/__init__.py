@@ -58,7 +58,6 @@ from .helpers import (
     convert_mapping_to_metric,
     loadModules,
     mapping_sources_changed,
-    parse_datetime,
     relative_to_absolute_pressure,
 )
 from .irrigation_unlimited import IrrigationUnlimitedIntegration
@@ -2032,9 +2031,12 @@ class SmartIrrigationCoordinator(
                 weatherdata = await self.apply_aggregates_to_mapping_data(
                     mapping,
                     persist=not dry_run,
-                    since=parse_datetime(zone.get(const.ZONE_LAST_CONSUMED_AT)),
+                    since=self.zone_window_start(zone),
                 )
-            else:
+            # The buffer can hold readings this zone has already consumed, so a
+            # non-empty buffer still leaves an empty window. Calculating on None
+            # raised inside the module and surfaced as a failed HTTP request.
+            if weatherdata is None:
                 _LOGGER.error(
                     "[async_update_zone_config] Error calculating zone %s: no sensor data available",
                     zone.get(const.ZONE_NAME),
@@ -2058,7 +2060,11 @@ class SmartIrrigationCoordinator(
                     return
 
             result = await self.async_calculate_zone(
-                zone_id, weatherdata, forecastdata, delete_weather_data, dry_run
+                zone_id,
+                weatherdata,
+                forecastdata,
+                delete_weather_data=delete_weather_data,
+                dry_run=dry_run,
             )
             if dry_run:
                 # Nothing was written, so there is no new start event to register
